@@ -531,6 +531,11 @@ function toolChoice(value, originalToWire) {
   throw providerError("Unsupported tool_choice value", "CURSOR_UNSUPPORTED_REQUEST")
 }
 
+function cursorProviderOptions(reasoningEffort) {
+  if (typeof reasoningEffort !== "string" || !reasoningEffort) return {}
+  return { providerOptions: { cursor: { reasoningEffort } } }
+}
+
 function usageFromPart(usage) {
   const prompt = usage?.inputTokens?.total || 0
   const completion = usage?.outputTokens?.total || 0
@@ -603,6 +608,7 @@ async function runChat(id, params, signal) {
     abortSignal: signal.controller.signal,
     ...(Number.isFinite(params.temperature) ? { temperature: params.temperature } : {}),
     ...(Number.isFinite(params.maxOutputTokens) ? { maxOutputTokens: params.maxOutputTokens } : {}),
+    ...cursorProviderOptions(params.reasoningEffort),
   }
   const choices = []
   let text = ""
@@ -1014,6 +1020,11 @@ if (SELF_TEST) {
     globalThis.fetch = originalFetch
   }
   if (!oauthRefreshGuard) throw new Error("Hermes OAuth refresh contract self-test failed")
+  const reasoningOptions = cursorProviderOptions("high")
+  const reasoningEffortGuard =
+    reasoningOptions.providerOptions?.cursor?.reasoningEffort === "high" &&
+    Object.keys(cursorProviderOptions()).length === 0
+  if (!reasoningEffortGuard) throw new Error("Hermes reasoning effort forwarding self-test failed")
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
@@ -1022,6 +1033,7 @@ if (SELF_TEST) {
       unknownHistoryGuard,
       unsupportedWebpGuard,
       oauthRefreshGuard,
+      reasoningEffortGuard,
     })}\n`,
   )
   process.exit(0)

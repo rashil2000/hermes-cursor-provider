@@ -73,12 +73,36 @@ python "$CURSOR_PLUGIN" models --available
 python "$CURSOR_PLUGIN" configure exact-cursor-model-id another-exact-id
 python "$CURSOR_PLUGIN" models
 python "$CURSOR_PLUGIN" doctor
-hermes model --refresh
-hermes gateway restart
 ```
 
 The repository-local Python launcher exists because a Git plugin install does
 not create a global `hermes-cursor` command.
+
+Hermes currently excludes externally authenticated process providers from the
+`hermes model` setup picker, so `cursor` does not appear there. Select it
+explicitly inside an active Hermes chat:
+
+```text
+/model exact-cursor-model-id --provider cursor --global
+```
+
+Alternatively, set the default directly in `~/.hermes/config.yaml` before
+restarting the gateway:
+
+```yaml
+model:
+  provider: cursor
+  default: exact-cursor-model-id
+```
+
+Do not add Cursor under the top-level `providers:` mapping; that mapping
+defines custom HTTP endpoints and would bypass this plugin.
+
+Restart the gateway after editing the configuration directly:
+
+```bash
+hermes gateway restart
+```
 
 ## Install with pip
 
@@ -91,8 +115,6 @@ hermes-cursor login --no-browser
 hermes-cursor models --available
 hermes-cursor configure exact-cursor-model-id another-exact-id
 hermes-cursor doctor
-hermes model --refresh
-hermes gateway restart
 ```
 
 The wheel contains the same bundled worker used by the Git installation.
@@ -101,6 +123,29 @@ The wheel contains the same bundled worker used by the Git installation.
 intersection of the account catalog and the exact configured allowlist.
 If discovery fails, Hermes receives no live models and the plugin emits a
 sanitized warning; it never substitutes a stale or bundled entitlement catalog.
+
+## Reasoning effort
+
+Set reasoning effort for the current session with Hermes's `/reasoning`
+command, or add `--global` to persist it:
+
+```text
+/reasoning high
+/reasoning high --global
+/reasoning none
+```
+
+The equivalent global configuration is:
+
+```yaml
+agent:
+  reasoning_effort: high
+```
+
+Hermes accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and
+`ultra`. This plugin forwards the selected value to Cursor's model-variant
+parameters. Use a level supported by the selected Cursor model; unsupported
+levels may be rejected by Cursor.
 
 ## Configuration
 

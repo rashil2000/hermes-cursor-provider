@@ -20,12 +20,22 @@ Choose the exact model IDs you approve from that output, then configure them:
 python "$CURSOR_PLUGIN" configure exact-model-id another-exact-model-id
 python "$CURSOR_PLUGIN" models
 python "$CURSOR_PLUGIN" doctor
-hermes model --refresh
-hermes gateway restart
 ```
 
-The `hermes model` picker should now offer the `cursor` provider and only the
-intersection of the configured IDs and models currently available to the
-authenticated account.
+Hermes currently excludes externally authenticated process providers from its
+terminal setup picker. Select Cursor explicitly inside an active chat:
+
+```text
+/model exact-model-id --provider cursor --global
+```
+
+The plugin exposes only the intersection of the configured IDs and models
+currently available to the authenticated account.
+
+Restart the gateway after editing `config.yaml` directly:
+
+```bash
+hermes gateway restart
+```
 
 For security and complete-removal instructions, see the plugin README.

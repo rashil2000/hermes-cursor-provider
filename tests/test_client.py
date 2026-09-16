@@ -93,6 +93,16 @@ def test_nonstream_completion_has_openai_attribute_shape() -> None:
     assert supervisor.requests[0][1]["sessionId"] == "session-1"
 
 
+def test_reasoning_effort_is_forwarded_to_worker() -> None:
+    client, supervisor = make_client()
+    client.chat.completions.create(
+        model="approved-model",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="high",
+    )
+    assert supervisor.requests[0][1]["reasoningEffort"] == "high"
+
+
 def test_constructor_timeout_bounds_requests_and_call_override_wins() -> None:
     supervisor = FakeSupervisor()
     client = HermesCursorClient(supervisor=supervisor, timeout=12.5)
