@@ -8,6 +8,8 @@ import process from "node:process"
 const PROTOCOL_VERSION = 1
 const MAX_FRAME_BYTES = 40 * 1024 * 1024
 const LOGIN_TIMEOUT_MS = 5 * 60_000
+const OAUTH_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
+const CURSOR_CLIENT_TYPE = "ide"
 const SELF_TEST = process.argv.includes("--self-test")
 const [NODE_MAJOR, NODE_MINOR] = process.versions.node.split(".").map(Number)
 if (NODE_MAJOR < 22 || (NODE_MAJOR === 22 && NODE_MINOR < 19)) {
@@ -146,6 +148,12 @@ function readCredentials() {
   if (typeof value?.refreshToken !== "string" || !value.refreshToken) {
     throw providerError("Cursor credential file is invalid", "CURSOR_AUTH_INVALID")
   }
+  if (
+    value.accessToken !== undefined &&
+    (typeof value.accessToken !== "string" || !value.accessToken)
+  ) {
+    throw providerError("Cursor credential file is invalid", "CURSOR_AUTH_INVALID")
+  }
   return value
 }
 
@@ -195,13 +203,18 @@ function accountKeyForToken(accessToken, refreshToken) {
 async function refreshAccessToken(refreshToken) {
   let response
   try {
-    response = await fetch(`${API_BASE}/auth/token`, {
+    response = await fetch(`${API_BASE}/oauth/token`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "x-cursor-client-type": CURSOR_CLIENT_TYPE,
       },
-      body: JSON.stringify({ refreshToken }),
-      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: OAUTH_CLIENT_ID,
+        refresh_token: refreshToken,
+      }),
+      signal: AbortSignal.timeout(20_000),
     })
   } catch (cause) {
     throw providerError("Cursor token refresh request failed", "CURSOR_AUTH_REFRESH_NETWORK", {
@@ -220,14 +233,17 @@ async function refreshAccessToken(refreshToken) {
     )
   }
   const body = await response.json()
-  if (typeof body.accessToken !== "string" || !body.accessToken) {
+  if (body?.shouldLogout === true) {
+    throw providerError("Cursor revoked this login; sign in again", "CURSOR_AUTH_EXPIRED")
+  }
+  if (typeof body?.access_token !== "string" || !body.access_token) {
     throw providerError("Cursor token refresh returned no access token", "CURSOR_AUTH_REFRESH_INVALID")
   }
   return {
-    accessToken: body.accessToken,
+    accessToken: body.access_token,
     refreshToken:
-      typeof body.refreshToken === "string" && body.refreshToken
-        ? body.refreshToken
+      typeof body.refresh_token === "string" && body.refresh_token
+        ? body.refresh_token
         : refreshToken,
   }
 }
@@ -247,11 +263,13 @@ async function refreshAndCacheAccessToken() {
       ? credentials.accountKey
       : accountKeyForToken(refreshed.accessToken, refreshed.refreshToken)
   if (
+    refreshed.accessToken !== credentials.accessToken ||
     refreshed.refreshToken !== credentials.refreshToken ||
     credentials.accountKey !== accountKey
   ) {
     atomicPrivateJson(requiredPath(CREDENTIALS_FILE, "credentials path"), {
       version: 1,
+      accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken,
       accountKey,
     })
@@ -266,6 +284,20 @@ async function refreshAndCacheAccessToken() {
 
 async function accessToken() {
   if (accessTokenCache && accessTokenCache.expiresAt - Date.now() > 5 * 60_000) {
+    return accessTokenCache.value
+  }
+  const credentials = readCredentials()
+  const persistedExpiry =
+    typeof credentials.accessToken === "string" ? jwtExpiry(credentials.accessToken) : 0
+  if (credentials.accessToken && persistedExpiry - Date.now() > 5 * 60_000) {
+    accessTokenCache = {
+      value: credentials.accessToken,
+      expiresAt: persistedExpiry,
+      accountKey:
+        typeof credentials.accountKey === "string" && credentials.accountKey
+          ? credentials.accountKey
+          : accountKeyForToken(credentials.accessToken, credentials.refreshToken),
+    }
     return accessTokenCache.value
   }
   if (!refreshInFlight) {
@@ -739,10 +771,16 @@ function abortableDelay(milliseconds, signal) {
 }
 
 async function login(id, controller) {
-  const verifier = base64url(crypto.randomBytes(96))
+  const verifier = base64url(crypto.randomBytes(32))
   const challenge = base64url(crypto.createHash("sha256").update(verifier).digest())
   const uuid = crypto.randomUUID()
-  const query = new URLSearchParams({ challenge, uuid, mode: "login", redirectTarget: "cli" })
+  const query = new URLSearchParams({
+    challenge,
+    uuid,
+    mode: "login",
+    supportsSelectedTeamLogin: "true",
+    redirectTarget: "cli",
+  })
   const url = `https://cursor.com/loginDeepControl?${query}`
   await writeFrame({ id, type: "login_url", url })
   let delay = 1_000
@@ -758,6 +796,7 @@ async function login(id, controller) {
       const response = await fetch(
         `${API_BASE}/auth/poll?uuid=${encodeURIComponent(uuid)}&verifier=${encodeURIComponent(verifier)}`,
         {
+          headers: { "x-cursor-client-type": CURSOR_CLIENT_TYPE },
           signal: AbortSignal.any([
             controller.signal,
             AbortSignal.timeout(Math.min(10_000, remaining)),
@@ -776,15 +815,17 @@ async function login(id, controller) {
       }
       credentialGeneration += 1
       refreshInFlight = null
+      const accountKey = accountKeyForToken(body.accessToken, body.refreshToken)
       atomicPrivateJson(requiredPath(CREDENTIALS_FILE, "credentials path"), {
         version: 1,
+        accessToken: body.accessToken,
         refreshToken: body.refreshToken,
-        accountKey: accountKeyForToken(body.accessToken, body.refreshToken),
+        accountKey,
       })
       accessTokenCache = {
         value: body.accessToken,
         expiresAt: jwtExpiry(body.accessToken) || Date.now() + 55 * 60_000,
-        accountKey: accountKeyForToken(body.accessToken, body.refreshToken),
+        accountKey,
       }
       await writeFrame({ id, type: "result", result: { authenticated: true } })
       return
@@ -949,15 +990,17 @@ if (SELF_TEST) {
     globalThis.fetch = async (url, options) => {
       const body = JSON.parse(String(options?.body || ""))
       oauthRefreshGuard =
-        String(url) === `${API_BASE}/auth/token` &&
+        String(url) === `${API_BASE}/oauth/token` &&
         options?.method === "POST" &&
         options?.headers?.["content-type"] === "application/json" &&
+        options?.headers?.["x-cursor-client-type"] === CURSOR_CLIENT_TYPE &&
         options?.headers?.authorization === undefined &&
-        body.refreshToken === "synthetic-refresh"
+        body.grant_type === "refresh_token" &&
+        body.client_id === OAUTH_CLIENT_ID &&
+        body.refresh_token === "synthetic-refresh"
       return new Response(
         JSON.stringify({
-          accessToken: "synthetic-access",
-          refreshToken: "synthetic-rotated-refresh",
+          access_token: "synthetic-access",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       )
@@ -966,7 +1009,7 @@ if (SELF_TEST) {
     oauthRefreshGuard =
       oauthRefreshGuard &&
       refreshed.accessToken === "synthetic-access" &&
-      refreshed.refreshToken === "synthetic-rotated-refresh"
+      refreshed.refreshToken === "synthetic-refresh"
   } finally {
     globalThis.fetch = originalFetch
   }

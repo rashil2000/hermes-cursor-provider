@@ -9,8 +9,9 @@ from typing import Any
 
 
 class FakeProviderProfile:
-    def __init__(self, **values: Any) -> None:
-        self.__dict__.update(values)
+    def __init__(self, *, name: str, auth_type: str = "api_key") -> None:
+        self.name = name
+        self.auth_type = auth_type
 
 
 def test_git_install_entrypoint_registers_and_finds_bundled_worker(

@@ -31,9 +31,11 @@ The worker bundles `cursor-opencode-provider` 0.6.7 into
 `worker/worker.bundle.mjs`. Its build dependency is locked by tarball integrity
 in `worker/package-lock.json`; users do not need npm or `node_modules`. The
 reviewed source revision is
-`889ad0bf981c0c325100134d86be87f426bc940f`. OAuth behavior is adapted from
-`offbynan/pi-cursor-provider` revision
-`a89ac0ff34d1d6209f5a40a0b362cce0eea5915c`.
+`889ad0bf981c0c325100134d86be87f426bc940f`. PKCE login was originally adapted
+from `offbynan/pi-cursor-provider` revision
+`a89ac0ff34d1d6209f5a40a0b362cce0eea5915c`. The current OAuth refresh grant
+follows Cursor 3.18.9 behavior documented and live-tested by `pi-cursor` at
+revision `511ca605ad7ca6a95ece26ed60260a4833a7fafe`.
 
 ## Requirements
 
@@ -105,7 +107,7 @@ sanitized warning; it never substitutes a stale or bundled entitlement catalog.
 | Environment variable | Purpose |
 |---|---|
 | `HERMES_CURSOR_HOME` | Provider root; defaults to `$HERMES_HOME/providers/cursor` |
-| `HERMES_CURSOR_CREDENTIALS_FILE` | Refresh credential override |
+| `HERMES_CURSOR_CREDENTIALS_FILE` | OAuth credential file override |
 | `HERMES_CURSOR_ALLOWLIST_FILE` | Exact model allowlist override |
 | `HERMES_CURSOR_STATE_DIR` | Conversation/checkpoint/blob state override |
 | `HERMES_CURSOR_ALLOWED_MODELS` | JSON array or comma-separated allowlist override |
@@ -132,8 +134,9 @@ be enforced administratively.
 ## Security boundaries
 
 - Login is explicit PKCE authentication.
-- Only the refresh credential is persisted. Access tokens remain in worker
-  memory and are refreshed before expiry.
+- The short-lived access token and durable refresh credential are persisted
+  together so a successful login remains usable across worker processes.
+  Access tokens are refreshed before expiry.
 - Credential directories and atomic writes use owner-only permissions on
   POSIX. The worker also refuses symlinked, non-regular, foreign-owned, or
   group/world-accessible credential files.

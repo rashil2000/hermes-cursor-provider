@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -17,6 +18,14 @@ except ImportError:  # Allows local tooling/tests without Hermes installed.
 from .client import HermesCursorClient
 
 logger = logging.getLogger(__name__)
+
+
+def _supported_profile_values(values: dict[str, Any]) -> dict[str, Any]:
+    """Drop declarative fields unavailable in the installed Hermes version."""
+    parameters = inspect.signature(ProviderProfile).parameters
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return values
+    return {name: value for name, value in values.items() if name in parameters}
 
 
 class CursorProviderProfile(ProviderProfile):  # type: ignore[misc]
@@ -77,24 +86,30 @@ class CursorProviderProfile(ProviderProfile):  # type: ignore[misc]
 
 
 cursor_profile = CursorProviderProfile(
-    name="cursor",
-    aliases=("cursor-subscription", "cursor-connect"),
-    api_mode="chat_completions",
-    display_name="Cursor Subscription",
-    description="Approved models from a Cursor subscription via a Hermes-owned worker",
-    signup_url="https://cursor.com/",
-    env_vars=(),
-    base_url="cursor+stdio://worker",
-    auth_type="external_process",
-    supports_health_check=False,
-    supports_model_listing=True,
-    supports_vision=True,
-    supports_vision_tool_messages=False,
-    supports_prompt_cache_key=False,
-    process_command="node",
-    process_args=(),
-    process_command_env_vars=("HERMES_CURSOR_NODE",),
-    process_args_env_var="",
-    fallback_models=(),
-    default_aux_model="",
+    **_supported_profile_values(
+        {
+            "name": "cursor",
+            "aliases": ("cursor-subscription", "cursor-connect"),
+            "api_mode": "chat_completions",
+            "display_name": "Cursor Subscription",
+            "description": (
+                "Approved models from a Cursor subscription via a Hermes-owned worker"
+            ),
+            "signup_url": "https://cursor.com/",
+            "env_vars": (),
+            "base_url": "cursor+stdio://worker",
+            "auth_type": "external_process",
+            "supports_health_check": False,
+            "supports_model_listing": True,
+            "supports_vision": True,
+            "supports_vision_tool_messages": False,
+            "supports_prompt_cache_key": False,
+            "process_command": "node",
+            "process_args": (),
+            "process_command_env_vars": ("HERMES_CURSOR_NODE",),
+            "process_args_env_var": "",
+            "fallback_models": (),
+            "default_aux_model": "",
+        }
+    )
 )
