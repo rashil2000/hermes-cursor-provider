@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import threading
 from collections.abc import Iterator
+from io import BytesIO
 from typing import Any
 
 import pytest
+from PIL import Image
 
 import hermes_cursor_provider.client as client_module
 from hermes_cursor_provider.client import HermesCursorClient, UnsupportedRequestError
@@ -215,6 +219,45 @@ def test_inline_two_by_two_png_passes_boundary_validation() -> None:
         ],
     )
     assert supervisor.requests[0][0] == "chat"
+    assert supervisor.requests[0][1]["messages"][0]["content"][1]["image_url"]["url"] == image
+
+
+def test_large_inline_image_is_normalized_before_worker_request() -> None:
+    client, supervisor = make_client()
+    original_width, original_height = 2_101, 1_200
+    source = Image.frombytes(
+        "RGB",
+        (original_width, original_height),
+        os.urandom(original_width * original_height * 3),
+    )
+    output = BytesIO()
+    source.save(output, format="PNG")
+    source.close()
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    assert len(encoded) > 5 * 1024 * 1024
+    image = f"data:image/png;base64,{encoded}"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is shown?"},
+                {"type": "image_url", "image_url": {"url": image}},
+            ],
+        }
+    ]
+    client.chat.completions.create(
+        model="approved-model",
+        messages=messages,
+    )
+
+    normalized = supervisor.requests[0][1]["messages"][0]["content"][1]["image_url"]["url"]
+    normalized_header, normalized_encoded = normalized.split(",", 1)
+    assert normalized_header in {"data:image/png;base64", "data:image/jpeg;base64"}
+    assert len(normalized_encoded) <= 5 * 1024 * 1024
+    with Image.open(BytesIO(base64.b64decode(normalized_encoded))) as resized:
+        assert resized.width <= 2_000
+        assert resized.height <= 2_000
+    assert messages[0]["content"][1]["image_url"]["url"] == image
 
 
 def test_async_inline_image_completion_is_awaitable_and_nonblocking() -> None:

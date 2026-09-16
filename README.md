@@ -188,6 +188,8 @@ be enforced administratively.
 - Prompts, responses, tokens, tool arguments, and images are not logged.
 - Only inline base64 PNG, JPEG, and GIF user images are accepted.
 - The Python boundary enforces image count, byte, dimension, and pixel limits.
+- Images exceeding 2000×2000 or 5 MiB of base64 are resized before entering
+  the worker, matching OpenCode's default attachment limits.
 - Hermes functions are renamed into a collision-resistant worker namespace
   before advertisement as Cursor MCP tools. Returned calls are accepted only
   when they map to a function Hermes advertised.

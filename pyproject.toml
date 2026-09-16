@@ -16,6 +16,9 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
+dependencies = [
+  "Pillow",
+]
 
 [project.scripts]
 hermes-cursor = "hermes_cursor_provider.cli:main"

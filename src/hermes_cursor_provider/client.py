@@ -9,6 +9,7 @@ import math
 import re
 import struct
 import threading
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -23,6 +24,10 @@ _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGES = 8
 _MAX_DIMENSION = 16_384
 _MAX_PIXELS = 100_000_000
+_CURSOR_MAX_IMAGE_WIDTH = 2_000
+_CURSOR_MAX_IMAGE_HEIGHT = 2_000
+_CURSOR_MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
+_CURSOR_JPEG_QUALITIES = (80, 85, 70, 55, 40)
 _WORKER_POOL_LOCK = threading.Lock()
 _WORKER_POOL: dict[tuple[Any, ...], tuple[WorkerSupervisor, int]] = {}
 
@@ -139,8 +144,113 @@ def _image_dimensions(data: bytes, mime: str) -> tuple[int, int] | None:
     return None
 
 
-def _validate_messages(messages: list[dict[str, Any]]) -> None:
+def _image_data_url(mime: str, data: bytes) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _encode_image(image: Any, image_format: str, quality: int | None = None) -> bytes:
+    output = BytesIO()
+    options = {} if quality is None else {"quality": quality}
+    image.save(output, format=image_format, **options)
+    return output.getvalue()
+
+
+def _normalize_cursor_image(
+    url: str,
+    mime: str,
+    decoded: bytes,
+    dimensions: tuple[int, int],
+) -> str:
+    width, height = dimensions
+    encoded_size = len(base64.b64encode(decoded))
+    if (
+        width <= _CURSOR_MAX_IMAGE_WIDTH
+        and height <= _CURSOR_MAX_IMAGE_HEIGHT
+        and encoded_size <= _CURSOR_MAX_IMAGE_BASE64_BYTES
+    ):
+        return url
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise UnsupportedRequestError(
+            "Pillow is required to resize images for Cursor"
+        ) from exc
+
+    try:
+        with Image.open(BytesIO(decoded)) as opened:
+            opened.seek(0)
+            opened.load()
+            converted = (
+                opened
+                if opened.mode in {"RGB", "RGBA", "L", "LA"}
+                else opened.convert("RGBA" if "transparency" in opened.info else "RGB")
+            )
+            try:
+                source = converted.copy()
+            finally:
+                if converted is not opened:
+                    converted.close()
+    except Exception as exc:
+        raise UnsupportedRequestError(f"Could not decode {mime} image for resizing") from exc
+
+    scale = min(
+        1.0,
+        _CURSOR_MAX_IMAGE_WIDTH / width,
+        _CURSOR_MAX_IMAGE_HEIGHT / height,
+    )
+    candidate_width = max(1, math.floor(width * scale + 0.5))
+    candidate_height = max(1, math.floor(height * scale + 0.5))
+    seen_sizes: set[tuple[int, int]] = set()
+    try:
+        for _ in range(32):
+            size = (candidate_width, candidate_height)
+            if size in seen_sizes:
+                break
+            seen_sizes.add(size)
+            resized = (
+                source.copy()
+                if source.size == size
+                else source.resize(size, Image.Resampling.LANCZOS)
+            )
+            try:
+                png = _encode_image(resized, "PNG")
+                if len(base64.b64encode(png)) <= _CURSOR_MAX_IMAGE_BASE64_BYTES:
+                    return _image_data_url("image/png", png)
+
+                jpeg_image = (
+                    resized
+                    if resized.mode in {"RGB", "L"}
+                    else resized.convert("RGB")
+                )
+                try:
+                    for quality in _CURSOR_JPEG_QUALITIES:
+                        jpeg = _encode_image(jpeg_image, "JPEG", quality)
+                        if len(base64.b64encode(jpeg)) <= _CURSOR_MAX_IMAGE_BASE64_BYTES:
+                            return _image_data_url("image/jpeg", jpeg)
+                finally:
+                    if jpeg_image is not resized:
+                        jpeg_image.close()
+            finally:
+                resized.close()
+
+            candidate_width = (
+                1 if candidate_width == 1 else max(1, math.floor(candidate_width * 0.75))
+            )
+            candidate_height = (
+                1 if candidate_height == 1 else max(1, math.floor(candidate_height * 0.75))
+            )
+    finally:
+        source.close()
+
+    raise UnsupportedRequestError(
+        "Image could not be resized below Cursor's 2000x2000 / 5 MiB base64 limits"
+    )
+
+
+def _prepare_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     image_count = 0
+    prepared_messages: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             raise UnsupportedRequestError("Every message must be an object")
@@ -151,9 +261,12 @@ def _validate_messages(messages: list[dict[str, Any]]) -> None:
                 "Images and multipart content in tool results are not supported"
             )
         if not isinstance(content, list):
+            prepared_messages.append(message)
             continue
+        prepared_content: list[Any] = []
         for part in content:
             if not isinstance(part, dict) or part.get("type") != "image_url":
+                prepared_content.append(part)
                 continue
             if role != "user":
                 raise UnsupportedRequestError("Images are supported only in user messages")
@@ -164,7 +277,7 @@ def _validate_messages(messages: list[dict[str, Any]]) -> None:
                 )
             image_url = part.get("image_url")
             url = image_url.get("url") if isinstance(image_url, dict) else None
-            if not isinstance(url, str):
+            if not isinstance(image_url, dict) or not isinstance(url, str):
                 raise UnsupportedRequestError("image_url.url must be a string")
             match = _DATA_IMAGE_RE.fullmatch(url)
             if not match:
@@ -194,6 +307,26 @@ def _validate_messages(messages: list[dict[str, Any]]) -> None:
                 raise UnsupportedRequestError(
                     f"Image dimensions {width}x{height} exceed provider limits"
                 )
+            normalized_url = _normalize_cursor_image(url, mime, decoded, dimensions)
+            if normalized_url == url:
+                prepared_content.append(part)
+            else:
+                prepared_content.append(
+                    {
+                        **part,
+                        "image_url": {
+                            **image_url,
+                            "url": normalized_url,
+                        },
+                    }
+                )
+        prepared_messages.append(
+            message if all(a is b for a, b in zip(prepared_content, content, strict=True)) else {
+                **message,
+                "content": prepared_content,
+            }
+        )
+    return prepared_messages
 
 
 def _timeout_seconds(value: Any, *, default: float = 900.0) -> float:
@@ -386,7 +519,7 @@ class HermesCursorClient:
                 "Cursor provider does not support request features: "
                 + ", ".join(sorted(set(requested)))
             )
-        _validate_messages(messages)
+        prepared_messages = _prepare_messages(messages)
         scope = extra_body or {}
         session_id: str | None = None
         if "hermes_session_id" in scope:
@@ -402,7 +535,7 @@ class HermesCursorClient:
         )
         params = {
             "model": model,
-            "messages": messages,
+            "messages": prepared_messages,
             "stream": stream,
             "tools": tools or [],
             "toolChoice": tool_choice,
