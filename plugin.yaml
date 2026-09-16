@@ -1,0 +1,11 @@
+name: cursor
+kind: model-provider
+version: 0.1.0
+description: Approved Cursor subscription models through a Hermes-owned stdio worker
+author: Rashil
+requires_hermes: ">=0.21.1"
+license: MIT
+homepage: https://github.com/rashil2000/hermes-cursor-provider
+tags:
+  - cursor
+  - model-provider

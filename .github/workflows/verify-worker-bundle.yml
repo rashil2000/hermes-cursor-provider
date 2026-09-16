@@ -1,0 +1,26 @@
+name: Verify worker bundle
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --prefix worker
+      - name: Rebuild committed bundle
+        run: npm run --prefix worker bundle
+      - name: Verify generated artifacts are current
+        run: git diff --exit-code -- worker/worker.bundle.mjs worker/worker.bundle.mjs.LEGAL.txt
