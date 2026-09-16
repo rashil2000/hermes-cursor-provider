@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import math
@@ -245,6 +246,33 @@ class _CompletionStream:
         self.close()
 
 
+def _next_stream_item(stream: _CompletionStream) -> tuple[bool, Any]:
+    """Read one synchronous stream item without leaking StopIteration through a Future."""
+    try:
+        return False, next(stream)
+    except StopIteration:
+        return True, None
+
+
+class _AsyncCompletionStream:
+    """Async iterator over the worker's blocking completion stream."""
+
+    def __init__(self, stream: _CompletionStream) -> None:
+        self._stream = stream
+
+    def __aiter__(self) -> _AsyncCompletionStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        done, item = await asyncio.to_thread(_next_stream_item, self._stream)
+        if done:
+            raise StopAsyncIteration
+        return item
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self._stream.close)
+
+
 class HermesCursorClient:
     """Minimal OpenAI client shape backed by one Hermes-owned Node worker."""
 
@@ -281,11 +309,25 @@ class HermesCursorClient:
         else:
             self._pool_key, self._worker = None, supervisor
         self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self._create_chat_completion)
+            completions=SimpleNamespace(create=self._dispatch_chat_completion)
         )
         self.api_key = ""
         self.base_url = "cursor+stdio://worker"
         self.is_closed = False
+
+    def _dispatch_chat_completion(self, **kwargs: Any) -> Any:
+        """Use the sync API normally and a worker thread when called from async Hermes paths."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._create_chat_completion(**kwargs)
+        return self._create_chat_completion_async(**kwargs)
+
+    async def _create_chat_completion_async(self, **kwargs: Any) -> Any:
+        response = await asyncio.to_thread(self._create_chat_completion, **kwargs)
+        if isinstance(response, _CompletionStream):
+            return _AsyncCompletionStream(response)
+        return response
 
     def _create_chat_completion(
         self,
