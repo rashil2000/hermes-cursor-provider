@@ -195,13 +195,12 @@ function accountKeyForToken(accessToken, refreshToken) {
 async function refreshAccessToken(refreshToken) {
   let response
   try {
-    response = await fetch(`${API_BASE}/auth/exchange_user_api_key`, {
+    response = await fetch(`${API_BASE}/auth/token`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${refreshToken}`,
         "content-type": "application/json",
       },
-      body: "{}",
+      body: JSON.stringify({ refreshToken }),
       signal: AbortSignal.timeout(10_000),
     })
   } catch (cause) {
@@ -944,6 +943,34 @@ if (SELF_TEST) {
     unsupportedWebpGuard = error?.code === "CURSOR_UNSUPPORTED_IMAGE"
   }
   if (!unsupportedWebpGuard) throw new Error("Hermes unsupported WebP rejection self-test failed")
+  let oauthRefreshGuard = false
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async (url, options) => {
+      const body = JSON.parse(String(options?.body || ""))
+      oauthRefreshGuard =
+        String(url) === `${API_BASE}/auth/token` &&
+        options?.method === "POST" &&
+        options?.headers?.["content-type"] === "application/json" &&
+        options?.headers?.authorization === undefined &&
+        body.refreshToken === "synthetic-refresh"
+      return new Response(
+        JSON.stringify({
+          accessToken: "synthetic-access",
+          refreshToken: "synthetic-rotated-refresh",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    const refreshed = await refreshAccessToken("synthetic-refresh")
+    oauthRefreshGuard =
+      oauthRefreshGuard &&
+      refreshed.accessToken === "synthetic-access" &&
+      refreshed.refreshToken === "synthetic-rotated-refresh"
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  if (!oauthRefreshGuard) throw new Error("Hermes OAuth refresh contract self-test failed")
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
@@ -951,6 +978,7 @@ if (SELF_TEST) {
       lostContinuationGuard,
       unknownHistoryGuard,
       unsupportedWebpGuard,
+      oauthRefreshGuard,
     })}\n`,
   )
   process.exit(0)

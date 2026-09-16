@@ -23271,13 +23271,12 @@ function accountKeyForToken(accessToken2, refreshToken) {
 async function refreshAccessToken2(refreshToken) {
   let response;
   try {
-    response = await fetch(`${API_BASE3}/auth/exchange_user_api_key`, {
+    response = await fetch(`${API_BASE3}/auth/token`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${refreshToken}`,
         "content-type": "application/json"
       },
-      body: "{}",
+      body: JSON.stringify({ refreshToken }),
       signal: AbortSignal.timeout(1e4)
     });
   } catch (cause) {
@@ -23974,13 +23973,34 @@ if (SELF_TEST) {
     unsupportedWebpGuard = error?.code === "CURSOR_UNSUPPORTED_IMAGE";
   }
   if (!unsupportedWebpGuard) throw new Error("Hermes unsupported WebP rejection self-test failed");
+  let oauthRefreshGuard = false;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      const body = JSON.parse(String(options?.body || ""));
+      oauthRefreshGuard = String(url) === `${API_BASE3}/auth/token` && options?.method === "POST" && options?.headers?.["content-type"] === "application/json" && options?.headers?.authorization === void 0 && body.refreshToken === "synthetic-refresh";
+      return new Response(
+        JSON.stringify({
+          accessToken: "synthetic-access",
+          refreshToken: "synthetic-rotated-refresh"
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    };
+    const refreshed = await refreshAccessToken2("synthetic-refresh");
+    oauthRefreshGuard = oauthRefreshGuard && refreshed.accessToken === "synthetic-access" && refreshed.refreshToken === "synthetic-rotated-refresh";
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  if (!oauthRefreshGuard) throw new Error("Hermes OAuth refresh contract self-test failed");
   process2.stdout.write(
     `${JSON.stringify({
       ok: true,
       wireName,
       lostContinuationGuard,
       unknownHistoryGuard,
-      unsupportedWebpGuard
+      unsupportedWebpGuard,
+      oauthRefreshGuard
     })}
 `
   );
