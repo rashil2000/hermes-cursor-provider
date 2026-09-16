@@ -23590,6 +23590,16 @@ function finishReason(part) {
   if (value === "error") return "error";
   return "stop";
 }
+function cursorSessionHeaders(sessionId) {
+  if (sessionId === void 0) return {};
+  if (typeof sessionId !== "string" || !sessionId) {
+    throw providerError(
+      "Hermes session id must be a non-empty string",
+      "CURSOR_UNSUPPORTED_REQUEST"
+    );
+  }
+  return { "x-session-id": sessionId };
+}
 async function runChat(id, params, signal) {
   const allowed = parseAllowedModels();
   if (!allowed.has(params.model)) {
@@ -23632,7 +23642,7 @@ async function runChat(id, params, signal) {
     prompt: openAiMessagesToPrompt(params.messages || [], tools.originalToWire),
     tools: tools.converted,
     toolChoice: toolChoice(params.toolChoice, tools.originalToWire),
-    headers: { "x-session-id": String(params.sessionId || crypto3.randomUUID()) },
+    headers: cursorSessionHeaders(params.sessionId),
     abortSignal: signal.controller.signal,
     ...Number.isFinite(params.temperature) ? { temperature: params.temperature } : {},
     ...Number.isFinite(params.maxOutputTokens) ? { maxOutputTokens: params.maxOutputTokens } : {},
@@ -24033,6 +24043,14 @@ if (SELF_TEST) {
   const reasoningOptions = cursorProviderOptions("high");
   const reasoningEffortGuard = reasoningOptions.providerOptions?.cursor?.reasoningEffort === "high" && Object.keys(cursorProviderOptions()).length === 0;
   if (!reasoningEffortGuard) throw new Error("Hermes reasoning effort forwarding self-test failed");
+  let invalidSessionGuard = false;
+  try {
+    cursorSessionHeaders(null);
+  } catch (error) {
+    invalidSessionGuard = error?.code === "CURSOR_UNSUPPORTED_REQUEST";
+  }
+  const sessionCorrelationGuard = cursorSessionHeaders("physical-session")["x-session-id"] === "physical-session" && Object.keys(cursorSessionHeaders(void 0)).length === 0 && invalidSessionGuard;
+  if (!sessionCorrelationGuard) throw new Error("Hermes session correlation self-test failed");
   process2.stdout.write(
     `${JSON.stringify({
       ok: true,
@@ -24041,7 +24059,8 @@ if (SELF_TEST) {
       unknownHistoryGuard,
       unsupportedWebpGuard,
       oauthRefreshGuard,
-      reasoningEffortGuard
+      reasoningEffortGuard,
+      sessionCorrelationGuard
     })}
 `
   );

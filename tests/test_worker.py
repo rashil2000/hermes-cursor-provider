@@ -95,6 +95,7 @@ def test_bundled_worker_is_standalone_and_passes_self_test(tmp_path: Path) -> No
     assert '"unsupportedWebpGuard":true' in result.stdout
     assert '"oauthRefreshGuard":true' in result.stdout
     assert '"reasoningEffortGuard":true' in result.stdout
+    assert '"sessionCorrelationGuard":true' in result.stdout
 
 
 def test_supervisor_multiplexes_concurrent_requests(tmp_path: Path) -> None:

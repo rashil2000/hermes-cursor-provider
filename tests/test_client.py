@@ -93,6 +93,15 @@ def test_nonstream_completion_has_openai_attribute_shape() -> None:
     assert supervisor.requests[0][1]["sessionId"] == "session-1"
 
 
+def test_completion_without_explicit_session_id_is_uncorrelated() -> None:
+    client, supervisor = make_client()
+    client.chat.completions.create(
+        model="approved-model",
+        messages=[{"role": "user", "content": "title this"}],
+    )
+    assert "sessionId" not in supervisor.requests[0][1]
+
+
 def test_reasoning_effort_is_forwarded_to_worker() -> None:
     client, supervisor = make_client()
     client.chat.completions.create(

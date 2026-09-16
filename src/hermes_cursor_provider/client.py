@@ -8,7 +8,6 @@ import math
 import re
 import struct
 import threading
-import uuid
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -347,14 +346,13 @@ class HermesCursorClient:
             )
         _validate_messages(messages)
         scope = extra_body or {}
+        session_id: str | None = None
         if "hermes_session_id" in scope:
             session_id = scope["hermes_session_id"]
             if not isinstance(session_id, str) or not session_id:
                 raise UnsupportedRequestError(
                     "hermes_session_id must be a non-empty string"
                 )
-        else:
-            session_id = str(uuid.uuid4())
         timeout_seconds = (
             _timeout_seconds(timeout, default=self._default_timeout_seconds)
             if timeout is not None
@@ -366,12 +364,13 @@ class HermesCursorClient:
             "stream": stream,
             "tools": tools or [],
             "toolChoice": tool_choice,
-            "sessionId": session_id,
             "timeoutMs": int(timeout_seconds * 1000),
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
             "reasoningEffort": reasoning_effort,
         }
+        if session_id is not None:
+            params["sessionId"] = session_id
         request = self._worker.request("chat", params)
         if stream:
             return _CompletionStream(request)
