@@ -27,11 +27,11 @@ service. The Python client starts the worker lazily, performs a protocol-version
 handshake, cancels streams explicitly, and terminates the worker when Hermes
 closes the client.
 
-The worker bundles `cursor-opencode-provider` 0.6.7 into
+The worker bundles `cursor-opencode-provider` 0.7.2 into
 `worker/worker.bundle.mjs`. Its build dependency is locked by tarball integrity
 in `worker/package-lock.json`; users do not need npm or `node_modules`. The
 reviewed source revision is
-`889ad0bf981c0c325100134d86be87f426bc940f`. PKCE login was originally adapted
+`823dcafabb39aea236a3a8d9b198da93f3f74d5f`. PKCE login was originally adapted
 from `offbynan/pi-cursor-provider` revision
 `a89ac0ff34d1d6209f5a40a0b362cce0eea5915c`. The current OAuth refresh grant
 follows Cursor 3.18.9 behavior documented and live-tested by `pi-cursor` at

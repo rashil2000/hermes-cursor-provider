@@ -7,7 +7,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "cursor-opencode-provider": "0.6.7"
+    "cursor-opencode-provider": "0.7.2"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

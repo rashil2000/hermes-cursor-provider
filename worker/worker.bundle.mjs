@@ -48,7 +48,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // node_modules/cursor-opencode-provider/dist/shared.js
-var CURSOR_API_HOST, CURSOR_WEBSITE_HOST, FALLBACK_CLIENT_VERSION, CURSOR_PROVIDER_ID, CURSOR_COMPACTION_OPTION, SERVER_CONFIG_PATH, MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS, CONVERSATION_CACHE_DIR, CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS, VERSION_CACHE_FILE, CONNECT_PROTOCOL_VERSION;
+var CURSOR_API_HOST, CURSOR_WEBSITE_HOST, FALLBACK_CLIENT_VERSION, CURSOR_PROVIDER_ID, CURSOR_COMPACTION_OPTION, CURSOR_HOST_AGENT_OPTION, SERVER_CONFIG_PATH, MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS, CONVERSATION_CACHE_DIR, CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS, VERSION_CACHE_FILE, CONNECT_PROTOCOL_VERSION;
 var init_shared = __esm({
   "node_modules/cursor-opencode-provider/dist/shared.js"() {
     CURSOR_API_HOST = "api2.cursor.sh";
@@ -56,12 +56,13 @@ var init_shared = __esm({
     FALLBACK_CLIENT_VERSION = "cli-2026.07.09-a3815c0";
     CURSOR_PROVIDER_ID = "cursor";
     CURSOR_COMPACTION_OPTION = "opencodeCompaction";
+    CURSOR_HOST_AGENT_OPTION = "opencodeHostAgent";
     SERVER_CONFIG_PATH = "/aiserver.v1.ServerConfigService/GetServerConfig";
     MODEL_CACHE_FILE = "cursor-models.json";
     MODEL_CACHE_SCHEMA_VERSION = 3;
     MODEL_CACHE_TTL_MS = 864e5;
     CONVERSATION_CACHE_DIR = "cursor-conversations";
-    CONVERSATION_CACHE_SCHEMA_VERSION = 3;
+    CONVERSATION_CACHE_SCHEMA_VERSION = 4;
     CONVERSATION_CACHE_TTL_MS = 864e5;
     VERSION_CACHE_FILE = "cursor-client-version.json";
     CONNECT_PROTOCOL_VERSION = "1";
@@ -1628,13 +1629,13 @@ var require_aspromise = __commonJS({
     "use strict";
     module.exports = asPromise;
     function asPromise(fn, ctx) {
-      var params = new Array(arguments.length - 1), offset = 0, index = 2, pending3 = true;
+      var params = new Array(arguments.length - 1), offset = 0, index = 2, pending4 = true;
       while (index < arguments.length)
         params[offset++] = arguments[index++];
       return new Promise(function executor(resolve2, reject) {
         params[offset] = function callback(err) {
-          if (pending3) {
-            pending3 = false;
+          if (pending4) {
+            pending4 = false;
             if (err)
               reject(err);
             else {
@@ -1648,8 +1649,8 @@ var require_aspromise = __commonJS({
         try {
           fn.apply(ctx || null, params);
         } catch (err) {
-          if (pending3) {
-            pending3 = false;
+          if (pending4) {
+            pending4 = false;
             reject(err);
           }
         }
@@ -8459,7 +8460,19 @@ function createMessageTypes() {
     { id: 1, name: "status_filter", type: "TodoStatus", repeated: true },
     { id: 2, name: "id_filter", type: "string", repeated: true }
   ]);
-  addType(root, "ReadTodosToolCall", [{ id: 1, name: "args", type: "ReadTodosArgs" }]);
+  addType(root, "ReadTodosSuccess", [
+    { id: 1, name: "todos", type: "TodoItem", repeated: true },
+    { id: 2, name: "total_count", type: "int32" }
+  ]);
+  addType(root, "ReadTodosError", [{ id: 1, name: "error", type: "string" }]);
+  addType(root, "ReadTodosResult", [
+    { id: 1, name: "success", type: "ReadTodosSuccess" },
+    { id: 2, name: "error", type: "ReadTodosError" }
+  ], [{ name: "result", fields: ["success", "error"] }]);
+  addType(root, "ReadTodosToolCall", [
+    { id: 1, name: "args", type: "ReadTodosArgs" },
+    { id: 2, name: "result", type: "ReadTodosResult" }
+  ]);
   addType(root, "AwaitArgs", [
     { id: 1, name: "task_id", type: "string" },
     { id: 2, name: "block_until_ms", type: "uint32" },
@@ -8655,7 +8668,9 @@ function createMessageTypes() {
   addType(root, "GrepContentResult", [
     { id: 1, name: "matches", type: "GrepFileMatch", repeated: true },
     { id: 2, name: "total_lines", type: "int32" },
-    { id: 3, name: "total_matched_lines", type: "int32" }
+    { id: 3, name: "total_matched_lines", type: "int32" },
+    { id: 4, name: "client_truncated", type: "bool" },
+    { id: 5, name: "ripgrep_truncated", type: "bool" }
   ]);
   addType(root, "GrepUnionResult", [
     { id: 2, name: "files", type: "GrepFilesResult" },
@@ -10663,6 +10678,8 @@ function parseBackgroundSpawnOutcome(output, policy) {
   };
 }
 function sanitizeCursorShellDisplayOutput(output, policy) {
+  if (typeof output !== "string")
+    return output;
   if (policy?.backgroundSpawn) {
     const spawn = parseBackgroundSpawnOutcome(output, policy);
     if (spawn)
@@ -10683,11 +10700,15 @@ function sanitizeCursorShellDisplayOutput(output, policy) {
   return output;
 }
 function sanitizeRegisteredCursorShellOutput(toolCallId, output) {
+  if (typeof output !== "string")
+    return output;
   if (typeof toolCallId !== "string" || !toolCallId)
     return output;
   return sanitizeCursorShellDisplayOutput(output, policies.get(toolCallId));
 }
 function captureCursorShellResult(toolCallId, output, metadata) {
+  if (typeof output !== "string")
+    return output;
   if (typeof toolCallId !== "string" || !toolCallId.startsWith("cursor_"))
     return output;
   const policy = policies.get(toolCallId);
@@ -10749,6 +10770,57 @@ var init_shell_timeout = __esm({
 import fs4 from "node:fs";
 import os3 from "node:os";
 import path5 from "node:path";
+function jsonSchemaProperties(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema))
+    return void 0;
+  const obj = schema;
+  if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+    return obj.properties;
+  }
+  const nested = obj.jsonSchema;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const props = nested.properties;
+    if (props && typeof props === "object" && !Array.isArray(props)) {
+      return props;
+    }
+  }
+  return void 0;
+}
+function opencodePathArg(args) {
+  if (!args)
+    return void 0;
+  return str(args.filePath) ?? str(args.path) ?? str(args.file_path);
+}
+function hostToolDialectFromTools(tools) {
+  let filePathKey;
+  for (const name14 of ["read", "write", "edit"]) {
+    const tool = tools.find((candidate) => candidate.name === name14);
+    const props = jsonSchemaProperties(tool?.inputSchema);
+    if (!props)
+      continue;
+    if ("path" in props && !("filePath" in props)) {
+      filePathKey = "path";
+      break;
+    }
+    if ("filePath" in props) {
+      filePathKey = "filePath";
+      break;
+    }
+  }
+  const names = new Set(tools.map((tool) => tool.name).filter((name14) => typeof name14 === "string"));
+  const shellTool = names.has("shell") && !names.has("bash") ? "shell" : "bash";
+  if (!filePathKey) {
+    filePathKey = shellTool === "shell" ? "path" : "filePath";
+  }
+  return { filePathKey, shellTool };
+}
+function assignHostFilePath(args, filePath, dialect) {
+  delete args.filePath;
+  delete args.path;
+  delete args.file_path;
+  if (filePath)
+    args[dialect.filePathKey] = filePath;
+}
 function sanitizeMcpServerId(value) {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -10835,15 +10907,13 @@ function resolveCustomWebToolAlias(toolName, aliases) {
 function toolsToMcpDescriptors(tools, providerIdentifier = "opencode", knownMcpServers = []) {
   if (tools.length === 0)
     return [];
-  const order = [];
   const byServer = /* @__PURE__ */ new Map();
-  for (const t of tools) {
+  for (const t of [...tools].sort((left, right) => left.name.localeCompare(right.name))) {
     const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers);
     let list = byServer.get(id.server);
     if (!list) {
       list = [];
       byServer.set(id.server, list);
-      order.push(id.server);
     }
     list.push({
       tool_name: t.sourceName ? t.name : id.toolName,
@@ -10851,7 +10921,14 @@ function toolsToMcpDescriptors(tools, providerIdentifier = "opencode", knownMcpS
       input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema))
     });
   }
-  return order.map((server) => ({
+  const orderedServers = [...byServer.keys()].sort((left, right) => {
+    if (left === providerIdentifier)
+      return right === providerIdentifier ? 0 : -1;
+    if (right === providerIdentifier)
+      return 1;
+    return left.localeCompare(right);
+  });
+  return orderedServers.map((server) => ({
     server_name: server,
     server_identifier: server,
     tools: byServer.get(server)
@@ -10861,29 +10938,48 @@ function parseSubagentDescriptionCatalog(description) {
   if (!description)
     return { found: false, agents: [] };
   const marker15 = description.indexOf(SUBAGENT_CATALOG_MARKER);
-  if (marker15 < 0)
-    return { found: false, agents: [] };
-  const agents = [];
-  const lines = description.slice(marker15 + SUBAGENT_CATALOG_MARKER.length).split(/\r?\n/);
-  let started = false;
-  for (const line of lines) {
-    const match = line.match(/^\s*-\s+([^:]+):\s*(.*)$/);
-    if (!match) {
-      if (started && line.trim())
-        break;
-      continue;
+  if (marker15 >= 0) {
+    const agents2 = [];
+    const lines = description.slice(marker15 + SUBAGENT_CATALOG_MARKER.length).split(/\r?\n/);
+    let started = false;
+    for (const line of lines) {
+      const match = line.match(/^\s*-\s+([^:]+):\s*(.*)$/);
+      if (!match) {
+        if (started && line.trim())
+          break;
+        continue;
+      }
+      started = true;
+      const name14 = match[1].trim().replace(/^`|`$/g, "");
+      if (!name14)
+        continue;
+      const agentDescription = match[2].trim();
+      agents2.push({
+        name: name14,
+        ...agentDescription ? { description: agentDescription } : {}
+      });
     }
-    started = true;
-    const name14 = match[1].trim().replace(/^`|`$/g, "");
-    if (!name14)
-      continue;
-    const agentDescription = match[2].trim();
+    return { found: true, agents: agents2 };
+  }
+  const inlineAt = description.indexOf(SUBAGENT_INLINE_MARKER);
+  if (inlineAt < 0)
+    return { found: false, agents: [] };
+  const rest = description.slice(inlineAt + SUBAGENT_INLINE_MARKER.length);
+  const agents = [];
+  const matches = rest.matchAll(/-\s+([A-Za-z0-9_-]+):\s*/g);
+  const hits = [...matches];
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i];
+    const name14 = hit[1];
+    const start = (hit.index ?? 0) + hit[0].length;
+    const end = i + 1 < hits.length ? hits[i + 1].index ?? rest.length : rest.length;
+    const agentDescription = rest.slice(start, end).trim();
     agents.push({
       name: name14,
       ...agentDescription ? { description: agentDescription } : {}
     });
   }
-  return { found: true, agents };
+  return { found: agents.length > 0, agents };
 }
 function subagentTypeEnumValues(schema) {
   const out = /* @__PURE__ */ new Set();
@@ -10900,7 +10996,7 @@ function subagentTypeEnumValues(schema) {
       return;
     }
     const record = value;
-    if (propertyName === "subagent_type" && Array.isArray(record.enum)) {
+    if ((propertyName === "subagent_type" || propertyName === "agent") && Array.isArray(record.enum)) {
       for (const item of record.enum) {
         if (typeof item === "string" && item)
           out.add(item);
@@ -10913,7 +11009,7 @@ function subagentTypeEnumValues(schema) {
   return [...out];
 }
 function extractHostSubagentCatalog(tools) {
-  const executorTool = tools.find((tool) => tool.name === "task");
+  const executorTool = tools.find((tool) => tool.name === "task") ?? tools.find((tool) => tool.name === "subagent");
   if (!executorTool)
     return { agents: [], complete: true };
   const described = parseSubagentDescriptionCatalog(executorTool.description);
@@ -10921,7 +11017,7 @@ function extractHostSubagentCatalog(tools) {
   const descriptions = new Map(described.agents.map((agent) => [agent.name, agent.description]));
   const names = new Set(enumNames.length > 0 ? enumNames : described.agents.map((agent) => agent.name));
   return {
-    executor: "task",
+    executor: executorTool.name === "subagent" ? "subagent" : "task",
     agents: [...names].map((name14) => ({
       name: name14,
       ...descriptions.get(name14) ? { description: descriptions.get(name14) } : {}
@@ -10961,21 +11057,27 @@ function remapNativeSubagentForCatalog(parsed, advertisedToolNames, catalog) {
   if (parsed.resultField !== "subagent_result" || parsed.toolName !== "task")
     return;
   const advertised = new Set(advertisedToolNames);
-  if (!advertised.has("task"))
+  const executor = advertised.has("task") ? "task" : advertised.has("subagent") ? "subagent" : void 0;
+  if (!executor)
     return;
-  const executor = "task";
   const description = str(parsed.args.description) ?? "";
   const prompt = str(parsed.args.prompt) ?? "";
-  const cursorSubagentType = str(parsed.resultMetadata?.cursor_subagent_type) ?? str(parsed.args.subagent_type) ?? "";
+  const cursorSubagentType = str(parsed.resultMetadata?.cursor_subagent_type) ?? str(parsed.args.subagent_type) ?? str(parsed.args.agent) ?? "";
   const subagentType = resolveCursorSubagentType(cursorSubagentType, catalog);
   if (!subagentType) {
     const available = catalog?.agents.map((agent) => agent.name).join(", ") || "none";
     parsed.localError = `Cursor subagent '${cursorSubagentType}' has no compatible host agent. Available subagents: ${available}.`;
     return;
   }
-  const resumeAgentId = str(parsed.args.task_id);
+  const resumeAgentId = str(parsed.args.task_id) ?? str(parsed.args.sessionID);
   parsed.toolName = executor;
-  parsed.args = {
+  parsed.args = executor === "subagent" ? {
+    agent: subagentType,
+    description,
+    prompt,
+    ...resumeAgentId ? { sessionID: resumeAgentId } : {},
+    ...parsed.args.background === true ? { background: true } : {}
+  } : {
     description,
     prompt,
     subagent_type: subagentType,
@@ -11076,7 +11178,7 @@ function remapCorrelatedEditWriteForCatalog(parsed, advertisedToolNames, editPat
   const advertised = new Set(advertisedToolNames);
   if (!advertised.has("edit") && !advertised.has(APPLY_PATCH_TOOL))
     return false;
-  const filePath = str(parsed.args.filePath);
+  const filePath = opencodePathArg(parsed.args);
   const content = stringValue(parsed.args.content);
   if (!filePath || content === void 0 || !editPath)
     return false;
@@ -11099,8 +11201,9 @@ function remapCorrelatedEditWriteForCatalog(parsed, advertisedToolNames, editPat
   if (!replacement)
     return false;
   parsed.toolName = "edit";
+  const filePathKey = typeof parsed.args.path === "string" && typeof parsed.args.filePath !== "string" ? "path" : "filePath";
   parsed.args = {
-    filePath,
+    [filePathKey]: filePath,
     oldString: replacement.oldString,
     newString: replacement.newString
   };
@@ -11116,7 +11219,7 @@ function remapEditToolsForCatalog(parsed, advertisedToolNames, workspaceRoot) {
   if (advertised.has(parsed.toolName) || !advertised.has(APPLY_PATCH_TOOL))
     return;
   const requested = parsed.toolName;
-  const filePath = str(parsed.args.filePath);
+  const filePath = opencodePathArg(parsed.args);
   const refuse = (reason) => {
     parsed.toolName = APPLY_PATCH_TOOL;
     parsed.args = {};
@@ -11165,6 +11268,14 @@ function remapEditToolsForCatalog(parsed, advertisedToolNames, workspaceRoot) {
   parsed.args = { patchText };
   parsed.resultMetadata = { ...parsed.resultMetadata, path: filePath };
 }
+function readRequestResultMetadata(raw, mappedArgs) {
+  const requestedPath = str(raw.path) ?? str(raw.filePath) ?? str(raw.file_path) ?? opencodePathArg(mappedArgs) ?? "";
+  return {
+    path: requestedPath,
+    ...typeof mappedArgs.offset === "number" ? { offset: mappedArgs.offset } : {},
+    ...typeof mappedArgs.limit === "number" ? { limit: mappedArgs.limit } : {}
+  };
+}
 function rejectPartialReadMutation(parsed) {
   if (parsed.localError)
     return;
@@ -11181,11 +11292,12 @@ function rejectPartialReadMutation(parsed) {
   }
   if (typeof content !== "string" || !content.includes("[Partial read:") || !content.includes("It is NOT the complete file."))
     return;
-  const filePath = typeof parsed.args.filePath === "string" ? parsed.args.filePath : "the target file";
+  const filePath = opencodePathArg(parsed.args) ?? "the target file";
   const nextOffset = /Continue with offset=(\d+)/.exec(content)?.[1];
-  parsed.localError = `NO FILE CHANGE WAS MADE. Refusing a whole-file mutation of ${JSON.stringify(filePath)} because it contains the provider's partial-read notice. Do not retry the same mutation. ` + (nextOffset ? `Read the file from offset=${nextOffset}, then use a targeted edit or Update File patch.` : "Read the remaining file ranges, then use a targeted edit or Update File patch.");
+  const longLine = content.includes("Use a byte-preserving read method");
+  parsed.localError = `NO FILE CHANGE WAS MADE. Refusing a whole-file mutation of ${JSON.stringify(filePath)} because it contains the provider's partial-read notice. Do not retry the same mutation. ` + (nextOffset ? `Read the file from offset=${nextOffset}, then use a targeted edit or Update File patch.` : longLine ? "Inspect the full line with a byte-preserving read method, then use a targeted edit or Update File patch." : "Read the remaining file ranges, then use a targeted edit or Update File patch.");
 }
-function parseExecServerMessage(msg) {
+function parseExecServerMessage(msg, dialect = OPENCODE_1_TOOL_DIALECT) {
   const id = msg.id;
   if (id === void 0)
     return void 0;
@@ -11226,7 +11338,7 @@ function parseExecServerMessage(msg) {
     return {
       id,
       execId,
-      toolName: "bash",
+      toolName: dialect.shellTool,
       args,
       resultField,
       resultMetadata: {
@@ -11264,13 +11376,15 @@ function parseExecServerMessage(msg) {
   }
   if (execVariant === "mcp_args") {
     const m = msg.mcp_args ?? {};
-    const mapped2 = mapCursorArgsToOpencode(mcpRealToolName(m), decodeMcpArgs(m.args), "mcp_args");
+    const rawArgs2 = decodeMcpArgs(m.args);
+    const mapped2 = mapCursorArgsToOpencode(mcpRealToolName(m), rawArgs2, "mcp_args", dialect);
     return {
       id,
       execId,
       toolName: mapped2.toolName,
       args: mapped2.args,
-      resultField
+      resultField,
+      ...mapped2.toolName === "read" ? { resultMetadata: readRequestResultMetadata(rawArgs2, mapped2.args) } : {}
     };
   }
   if (execVariant === "pi_edit_args") {
@@ -11281,8 +11395,7 @@ function parseExecServerMessage(msg) {
     const oldString = replacement ? stringValue(replacement.old_text) : void 0;
     const newString = replacement ? stringValue(replacement.new_text) : void 0;
     const args = {};
-    if (path25)
-      args.filePath = path25;
+    assignHostFilePath(args, path25, dialect);
     if (oldString !== void 0)
       args.oldString = oldString;
     if (newString !== void 0)
@@ -11299,13 +11412,9 @@ function parseExecServerMessage(msg) {
   const toolName = cursorToolToOpencode[execVariant];
   if (!toolName)
     return void 0;
-  const mapped = mapCursorArgsToOpencode(toolName, msg[execVariant] ?? {}, execVariant);
+  const mapped = mapCursorArgsToOpencode(toolName, msg[execVariant] ?? {}, execVariant, dialect);
   const rawArgs = msg[execVariant] ?? {};
-  const resultMetadata = execVariant === "shell_stream_args" || execVariant === "shell_args" ? shellStreamResultMetadata(rawArgs) : execVariant === "read_args" ? {
-    path: str(rawArgs.path) ?? str(rawArgs.file_path) ?? "",
-    ...typeof mapped.args.offset === "number" ? { offset: mapped.args.offset } : {},
-    ...typeof mapped.args.limit === "number" ? { limit: mapped.args.limit } : {}
-  } : void 0;
+  const resultMetadata = execVariant === "shell_stream_args" || execVariant === "shell_args" ? shellStreamResultMetadata(rawArgs) : execVariant === "read_args" || execVariant === "pi_read_args" ? readRequestResultMetadata(rawArgs, mapped.args) : execVariant === "grep_args" ? grepRequestResultMetadata(rawArgs) : void 0;
   if (resultMetadata && resultMetadata.timeout_behavior !== 2 && typeof resultMetadata.timeout_ms === "number") {
     mapped.args.timeout = resultMetadata.timeout_ms;
   }
@@ -11340,7 +11449,7 @@ function shellStreamResultMetadata(raw) {
     ...hardTimeout !== void 0 && hardTimeout > 0 ? { hard_timeout_ms: hardTimeout } : {}
   };
 }
-function mapCursorArgsToOpencode(toolName, raw, execVariant) {
+function mapCursorArgsToOpencode(toolName, raw, execVariant, dialect = OPENCODE_1_TOOL_DIALECT) {
   const cleaned = {};
   for (const [k, v] of Object.entries(raw)) {
     if (v === void 0 || v === null)
@@ -11353,12 +11462,12 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
   }
   if (execVariant === "ls_args") {
     const filePath = str(cleaned.path) ?? str(cleaned.filePath);
-    return { toolName: "read", args: filePath ? { filePath } : {} };
+    return { toolName: "read", args: filePath ? { [dialect.filePathKey]: filePath } : {} };
   }
   if (execVariant === "delete_args") {
     const target = str(cleaned.path) ?? str(cleaned.filePath);
     return {
-      toolName: "bash",
+      toolName: dialect.shellTool,
       args: target ? { command: `rm -f -- ${shellQuote2(target)}` } : { command: "true" }
     };
   }
@@ -11366,8 +11475,7 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
     case "read": {
       const args = {};
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path);
-      if (filePath)
-        args.filePath = filePath;
+      assignHostFilePath(args, filePath, dialect);
       const offset = num(cleaned.offset);
       if (offset !== void 0 && offset > 0)
         args.offset = offset;
@@ -11379,8 +11487,7 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
     case "write": {
       const args = {};
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path);
-      if (filePath)
-        args.filePath = filePath;
+      assignHostFilePath(args, filePath, dialect);
       const bytes = bytesValue(cleaned.file_bytes) ?? bytesValue(cleaned.fileBytes);
       let content;
       if (bytes !== void 0) {
@@ -11401,8 +11508,7 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
       }
       const args = {};
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path);
-      if (filePath)
-        args.filePath = filePath;
+      assignHostFilePath(args, filePath, dialect);
       const oldString = stringValue(cleaned.oldString) ?? stringValue(cleaned.old_string);
       if (oldString !== void 0)
         args.oldString = oldString;
@@ -11413,7 +11519,8 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
         args.replaceAll = cleaned.replaceAll;
       return { toolName: "edit", args };
     }
-    case "bash": {
+    case "bash":
+    case "shell": {
       const args = {};
       const command = str(cleaned.command);
       if (command)
@@ -11424,7 +11531,7 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant) {
       const timeout = num(cleaned.timeout);
       if (timeout !== void 0)
         args.timeout = timeout;
-      return { toolName: "bash", args };
+      return { toolName: dialect.shellTool, args };
     }
     case "grep": {
       const pattern = str(cleaned.pattern);
@@ -11514,6 +11621,16 @@ function describeSubagentTask(prompt, subagentType) {
     return words.join(" ");
   return `${subagentType || "Delegated"} task`;
 }
+function preferCorrelatedTaskDescription(parsed, description) {
+  if (parsed.toolName !== "task" && parsed.toolName !== "subagent")
+    return;
+  if (parsed.resultField !== "subagent_result")
+    return;
+  const trimmed = description?.trim();
+  if (!trimmed)
+    return;
+  parsed.args.description = trimmed;
+}
 function shellQuote2(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
@@ -11574,9 +11691,11 @@ function isUriReadTarget(requested) {
 }
 function resolveReadTargetPath(requested, workspaceRoot) {
   const expanded = untildify(requested);
-  if (workspaceRoot && !path5.isAbsolute(expanded)) {
-    return path5.resolve(workspaceRoot, expanded);
+  if (isAbsoluteToolPath(expanded)) {
+    return isForeignAbsoluteToolPath(expanded) ? expanded : path5.resolve(expanded);
   }
+  if (workspaceRoot)
+    return joinToolPath(workspaceRoot, expanded);
   return path5.resolve(expanded);
 }
 function classifyMissingReadTarget(absolutePath) {
@@ -11616,13 +11735,14 @@ function buildExecClientMessages(input2) {
   const resultField = input2.resultField || "mcp_result";
   const frames = [];
   if (resultField === "shell_stream") {
+    const stdout = groundShellPathText(input2.output, shellPathRoot(input2.resultMetadata, input2.workspaceRoot));
     frames.push(encodeShellStream(input2.execId, void 0, { start: {} }));
     if (input2.error) {
       frames.push(encodeShellStream(input2.execId, void 0, { stderr: { data: input2.error } }));
       frames.push(encodeShellStream(input2.execId, input2.executionTimeMs, { exit: { code: 1, aborted: false } }));
     } else {
-      if (input2.output) {
-        frames.push(encodeShellStream(input2.execId, void 0, { stdout: { data: input2.output } }));
+      if (stdout) {
+        frames.push(encodeShellStream(input2.execId, void 0, { stdout: { data: stdout } }));
       }
       if (input2.shellOutcome?.kind === "backgrounded") {
         frames.push(encodeShellStream(input2.execId, input2.executionTimeMs, {
@@ -11814,9 +11934,376 @@ function buildUnsupportedExecDeny(input2) {
   frames.push(buildExecStreamClose(execId));
   return frames;
 }
+function normalizeToolText(output) {
+  return output.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+function parseOpenCode2FileRead(output, resultMetadata) {
+  const normalized = normalizeToolText(output).replace(/\n+$/, "");
+  if (!normalized.startsWith("Read file "))
+    return void 0;
+  const lines = normalized.split("\n");
+  const headerLine = (lines[0] ?? "").trim();
+  const empty = /^Read file (.*), 0 lines$/.exec(headerLine);
+  if (empty) {
+    if (lines.length !== 1)
+      return void 0;
+    return {
+      path: empty[1] ?? "",
+      content: "",
+      totalLines: 0,
+      hostTruncated: false,
+      outputCapped: false,
+      truncatedLines: []
+    };
+  }
+  const header2 = /^Read file (.*), lines (\d+)-(\d+)$/.exec(headerLine);
+  if (!header2)
+    return void 0;
+  const start = Number(header2[2]);
+  const end = Number(header2[3]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+    return void 0;
+  }
+  let bodyEnd = lines.length;
+  let nextOffset;
+  const banner = OPENCODE2_READ_TRUNCATION.exec(lines[lines.length - 1] ?? "");
+  if (banner) {
+    nextOffset = Number(banner[1]);
+    if (!Number.isSafeInteger(nextOffset) || nextOffset < 1)
+      return void 0;
+    bodyEnd -= 1;
+  }
+  const expected = end - start + 1;
+  if (bodyEnd - 1 !== expected)
+    return void 0;
+  const raw = [];
+  const truncatedLines = [];
+  for (let index = 0; index < expected; index++) {
+    const match = /^(\d+):[ \t](.*)$/.exec(lines[index + 1] ?? "");
+    if (!match || Number(match[1]) !== start + index)
+      return void 0;
+    const value = match[2] ?? "";
+    if (value.length === OPENCODE2_READ_MAX_LINE_CHARS + OPENCODE2_READ_LINE_TRUNCATION.length && value.endsWith(OPENCODE2_READ_LINE_TRUNCATION)) {
+      truncatedLines.push(start + index);
+    }
+    raw.push(value);
+  }
+  const content = raw.join("\n");
+  const hostTruncated = nextOffset !== void 0;
+  const requestedLimit = num(resultMetadata?.limit);
+  const effectiveLineLimit = requestedLimit !== void 0 && requestedLimit > 0 ? Math.min(requestedLimit, OPENCODE2_READ_MAX_LINES) : OPENCODE2_READ_MAX_LINES;
+  const outputCapped = hostTruncated && expected < effectiveLineLimit && Buffer.byteLength(content, "utf8") > OPENCODE_READ_MAX_BYTES - OPENCODE2_MAX_RENDERED_LINE_BYTES;
+  if (hostTruncated) {
+    return {
+      path: header2[1] ?? "",
+      content,
+      startLine: start,
+      endLine: end,
+      nextOffset,
+      hostTruncated: true,
+      outputCapped,
+      truncatedLines
+    };
+  }
+  return {
+    path: header2[1] ?? "",
+    content,
+    ...start === 1 ? { totalLines: end } : { startLine: start, endLine: end, totalLines: end },
+    hostTruncated: false,
+    outputCapped: false,
+    truncatedLines
+  };
+}
+function parseOpenCode2DirectoryListing(output, workspaceRoot) {
+  const normalized = normalizeToolText(output).replace(/\n+$/, "");
+  if (!normalized.startsWith("Read directory "))
+    return void 0;
+  const lines = normalized.split("\n");
+  const header2 = /^Read directory (.*), (?:0 entries|entries (\d+)-(\d+))$/.exec((lines[0] ?? "").trim());
+  if (!header2) {
+    trace("parseOpenCode2DirectoryListing: OpenCode 2 directory header did not match \u2014 leaving output unchanged");
+    return void 0;
+  }
+  const requested = header2[1] ?? "";
+  if (!isAbsoluteToolPath(requested) && !workspaceRoot)
+    return void 0;
+  let bodyEnd = lines.length;
+  let banner;
+  if (bodyEnd > 1 && OPENCODE2_READ_TRUNCATION.test(lines[bodyEnd - 1] ?? "")) {
+    banner = lines[bodyEnd - 1];
+    bodyEnd -= 1;
+  }
+  const rawEntries = lines.slice(1, bodyEnd);
+  if (header2[2] === void 0) {
+    if (rawEntries.length !== 0)
+      return void 0;
+  } else {
+    const start = Number(header2[2]);
+    const end = Number(header2[3]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end - start + 1 !== rawEntries.length) {
+      return void 0;
+    }
+  }
+  const directory = resolveToolPath(requested, workspaceRoot);
+  const directories = [];
+  const files = [];
+  const entries = rawEntries.map((entry) => {
+    const resolved = resolveListedEntry(directory, entry);
+    if (entry.endsWith("/") || entry.endsWith("\\"))
+      directories.push(resolved);
+    else
+      files.push(resolved);
+    return resolved;
+  });
+  const headerLine = header2[2] === void 0 ? `Read directory ${directory}, 0 entries` : `Read directory ${directory}, entries ${header2[2]}-${header2[3]}`;
+  return {
+    directory,
+    entries,
+    directories,
+    files,
+    text: [headerLine, ...entries, ...banner ? [banner] : []].join("\n")
+  };
+}
+function isAbsoluteToolPath(filePath) {
+  return path5.isAbsolute(filePath) || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\");
+}
+function isForeignAbsoluteToolPath(filePath) {
+  return isAbsoluteToolPath(filePath) && !path5.isAbsolute(filePath);
+}
+function toolPathSeparator(filePath) {
+  if (path5.isAbsolute(filePath))
+    return path5.sep;
+  if (filePath.startsWith("\\\\") || filePath.includes("\\") && !filePath.includes("/"))
+    return "\\";
+  return "/";
+}
+function joinToolPath(root, relative) {
+  if (!isForeignAbsoluteToolPath(root))
+    return path5.resolve(root, relative);
+  const sep = toolPathSeparator(root);
+  const base = splitForeignAbsolute(root, sep);
+  const parts = [...base.segments];
+  for (const part of relative.split(/[\\/]+/)) {
+    if (!part || part === ".")
+      continue;
+    if (part === "..") {
+      if (parts.length > base.frozen)
+        parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.length === 0 ? base.prefix : `${base.prefix}${parts.join(sep)}`;
+}
+function splitForeignAbsolute(filePath, sep) {
+  if (filePath.startsWith("\\\\")) {
+    const segments = filePath.slice(2).split(/[\\/]+/).filter(Boolean);
+    return { prefix: "\\\\", segments, frozen: Math.min(2, segments.length) };
+  }
+  const rest = filePath.slice(2).replace(/^[\\/]+/, "");
+  return {
+    prefix: `${filePath.slice(0, 2)}${sep}`,
+    segments: rest ? rest.split(/[\\/]+/).filter(Boolean) : [],
+    frozen: 0
+  };
+}
+function isRelativePathToken(token) {
+  if (!token || isAbsoluteToolPath(token))
+    return false;
+  if (/[\0"'`{}\[\]<>|;]/.test(token) || token.startsWith("@"))
+    return false;
+  if (token.startsWith("./") || token.startsWith("../") || token.startsWith(".\\") || token.startsWith("..\\"))
+    return true;
+  return token.includes("/") || path5.sep === "\\" && token.includes("\\");
+}
+function resolveListedEntry(directory, entry) {
+  if (!entry || isAbsoluteToolPath(entry))
+    return entry;
+  if (entry === "~" || entry.startsWith("~/") || entry.startsWith("~\\"))
+    return entry;
+  const directoryEntry = entry.endsWith("/") || entry.endsWith("\\");
+  const resolved = joinToolPath(directory, entry);
+  if (!directoryEntry || resolved.endsWith("/") || resolved.endsWith("\\"))
+    return resolved;
+  return `${resolved}${toolPathSeparator(resolved)}`;
+}
+function resolveToolPath(filePath, workspaceRoot) {
+  if (!filePath || isAbsoluteToolPath(filePath))
+    return filePath;
+  if (filePath === "~" || filePath.startsWith("~/") || filePath.startsWith("~\\"))
+    return filePath;
+  if (!workspaceRoot)
+    return filePath;
+  return joinToolPath(workspaceRoot, filePath);
+}
+function groundSearchOutput(output, workspaceRoot) {
+  if (!workspaceRoot)
+    return output;
+  const normalized = normalizeToolText(output);
+  const first = normalized.split("\n", 1)[0] ?? "";
+  const searchShaped = /^Found \d+ matches/.test(first) || first === "No matches found" || first === "No files found";
+  if (!searchShaped && !isBarePathList(normalized))
+    return output;
+  return normalized.split("\n").map((line) => rewriteSearchPathLine(line, workspaceRoot)).join("\n");
+}
+function isBarePathList(output) {
+  const lines = output.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0 || lines.length > 2e3)
+    return false;
+  return lines.every((line) => {
+    if (line.startsWith("("))
+      return true;
+    if (/\s/.test(line) || line.includes("://"))
+      return false;
+    return true;
+  });
+}
+function rewriteSearchPathLine(line, workspaceRoot) {
+  if (!line || line.startsWith(" ") || line.startsWith("	") || line.startsWith("("))
+    return line;
+  if (line.startsWith("Found ") || line === "No matches found" || line === "No files found")
+    return line;
+  const header2 = /^(.*):$/.exec(line);
+  if (header2 && !header2[1]?.includes("://")) {
+    return `${resolveToolPath(header2[1] ?? "", workspaceRoot)}:`;
+  }
+  if (line.includes("://"))
+    return line;
+  return resolveToolPath(line, workspaceRoot);
+}
+function groundShellPathText(output, root) {
+  if (!root || !output)
+    return output;
+  return normalizeToolText(output).split("\n").map((line) => rewriteShellPathLine(line, root)).join("\n");
+}
+function shellPathRoot(resultMetadata, workspaceRoot) {
+  const workingDirectory = str(resultMetadata?.working_directory)?.trim();
+  if (!workingDirectory)
+    return workspaceRoot;
+  if (isAbsoluteToolPath(workingDirectory))
+    return workingDirectory;
+  return workspaceRoot ? joinToolPath(workspaceRoot, workingDirectory) : void 0;
+}
+function rewriteShellPathLine(line, root) {
+  if (!line || line.startsWith(" ") || line.startsWith("	"))
+    return line;
+  const trimmed = line.trimEnd();
+  if (trimmed.includes("://") || trimmed === "~" || trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return line;
+  }
+  const located = /^(.+?):(\d+)(?::(\d+))?$/.exec(trimmed);
+  if (located && located[1] && isRelativePathToken(located[1])) {
+    const suffix = located[3] !== void 0 ? `:${located[2]}:${located[3]}` : `:${located[2]}`;
+    return `${resolveToolPath(located[1], root)}${suffix}`;
+  }
+  if (/\s/.test(trimmed))
+    return line;
+  const header2 = /^(.*):$/.exec(trimmed);
+  if (header2 && header2[1] && isRelativePathToken(header2[1])) {
+    return `${resolveToolPath(header2[1], root)}:`;
+  }
+  if (isRelativePathToken(trimmed))
+    return resolveToolPath(trimmed, root);
+  return line;
+}
+function parseOpenCodeGrepContent(output, workspaceRoot) {
+  const lines = normalizeToolText(output).split("\n");
+  const first = lines[0]?.trim() ?? "";
+  if (!/^Found \d+ matches\b/.test(first))
+    return void 0;
+  const matches = [];
+  let current;
+  let truncated = /\bmore matches available\b/.test(first);
+  let sawLine = false;
+  for (const raw of lines.slice(1)) {
+    if (!raw.trim())
+      continue;
+    const preview = OPENCODE_GREP_LINE.exec(raw);
+    if (preview) {
+      sawLine = true;
+      if (!current)
+        continue;
+      const lineNumber = Number(preview[1]);
+      if (!Number.isSafeInteger(lineNumber) || lineNumber < 1)
+        continue;
+      current.matches.push({ line_number: lineNumber, content: preview[2] ?? "" });
+      continue;
+    }
+    if (raw.trimStart().startsWith("(")) {
+      if (/truncat/i.test(raw))
+        truncated = true;
+      continue;
+    }
+    if (raw.startsWith(" ") || raw.startsWith("	"))
+      continue;
+    const header2 = /^(.*):$/.exec(raw.trim());
+    if (!header2 || !header2[1] || header2[1].includes("://"))
+      continue;
+    current = { file: resolveToolPath(header2[1], workspaceRoot), matches: [] };
+    matches.push(current);
+  }
+  if (!sawLine)
+    return void 0;
+  const withHits = matches.filter((file) => file.matches.length > 0);
+  if (withHits.length === 0)
+    return void 0;
+  return {
+    matches: withHits,
+    truncated,
+    totalMatchedLines: withHits.reduce((count, file) => count + file.matches.length, 0)
+  };
+}
+function grepRequestResultMetadata(raw) {
+  const pattern = str(raw.pattern);
+  const outputMode = str(raw.output_mode);
+  const searchPath = str(raw.path);
+  if (!pattern && !outputMode && !searchPath)
+    return void 0;
+  return {
+    ...pattern ? { pattern } : {},
+    ...outputMode ? { output_mode: outputMode } : {},
+    ...searchPath ? { path: searchPath } : {}
+  };
+}
+function extractGroundedPaths(output, workspaceRoot) {
+  const normalized = normalizeToolText(output);
+  const directory = parseOpenCode2DirectoryListing(normalized, workspaceRoot);
+  if (directory)
+    return directory.entries.slice(0, 2e3);
+  const first = normalized.split("\n", 1)[0]?.trim() ?? "";
+  if (/^Found \d+ matches/.test(first) || first === "No matches found" || first === "No files found") {
+    const paths = [];
+    for (const raw of normalized.split("\n").slice(1)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("(") || line.startsWith("Line ") || raw.startsWith(" ") || raw.startsWith("	")) {
+        continue;
+      }
+      const header2 = /^(.*):$/.exec(line);
+      const candidate = header2 && !header2[1]?.includes("://") ? header2[1] ?? "" : line;
+      if (!candidate || candidate.includes("://"))
+        continue;
+      paths.push(resolveToolPath(candidate, workspaceRoot));
+    }
+    return paths.slice(0, 2e3);
+  }
+  if (isBarePathList(output)) {
+    return output.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("(")).map((line) => resolveToolPath(line.endsWith(":") && !line.includes("://") ? line.slice(0, -1) : line, workspaceRoot)).slice(0, 2e3);
+  }
+  return extractPathLines(output).map((line) => {
+    const trimmed = line.trim();
+    const candidate = trimmed.endsWith(":") && !trimmed.includes("://") ? trimmed.slice(0, -1) : trimmed;
+    return resolveToolPath(candidate, workspaceRoot);
+  });
+}
 function unwrapReadOutput(output) {
   if (typeof output !== "string" || output.length === 0)
     return output;
+  const opencode2 = parseOpenCode2FileRead(output);
+  if (opencode2)
+    return opencode2.content;
+  if (normalizeToolText(output).startsWith("Read file ")) {
+    trace("unwrapReadOutput: OpenCode 2 read header did not match the page parser \u2014 leaving output unchanged");
+  }
   const contentHeaderIdx = output.indexOf("<content>");
   if (contentHeaderIdx === -1)
     return output;
@@ -11839,26 +12326,34 @@ function unwrapReadOutput(output) {
   return raw.join("\n");
 }
 function buildTypedExecResult(resultField, output, error, toolName, resultMetadata, shellOutcome, workspaceRoot) {
-  const resultRoot = typeof workspaceRoot === "string" && workspaceRoot.trim() ? path5.resolve(workspaceRoot) : void 0;
+  const trimmedRoot = typeof workspaceRoot === "string" ? workspaceRoot.trim() : "";
+  const resultRoot = trimmedRoot ? isForeignAbsoluteToolPath(trimmedRoot) ? trimmedRoot : path5.resolve(trimmedRoot) : void 0;
   switch (resultField) {
     case "read_result": {
-      const readPath = str(resultMetadata?.path) ?? extractPathTag(output) ?? "";
+      const parsedFile = parseOpenCode2FileRead(output, resultMetadata);
+      const listing = error ? void 0 : parseOpenCode2DirectoryListing(output, resultRoot);
+      const rawPath = str(resultMetadata?.path) ?? parsedFile?.path ?? listing?.directory ?? extractPathTag(output) ?? "";
+      const readPath = resolveToolPath(rawPath, resultRoot);
       if (error)
         return { error: { path: readPath, error } };
-      const statPath = extractPathTag(output) ?? readPath;
-      const outputMetadata = parseOpenCodeReadMetadata(output);
-      const content = restoreCompleteReadTerminator(unwrapReadOutput(output), statPath, outputMetadata, resultMetadata, resultRoot);
+      const outputPath = parsedFile?.path ?? extractPathTag(output);
+      const statPath = resolveToolPath(outputPath ?? readPath, resultRoot);
+      const outputMetadata = parseOpenCodeReadMetadata(output, resultMetadata);
+      const content = listing ? listing.text : restoreCompleteReadTerminator(unwrapReadOutput(output), statPath, outputMetadata, resultMetadata, resultRoot);
       const totalLines = outputMetadata.totalLines ?? readFileLineCount(statPath) ?? countLines(content);
       const rangeApplied = readRangeApplied(resultMetadata, totalLines);
-      const notice = readTruncationNotice(output, resultMetadata);
+      const notices = [
+        readTruncationNotice(output, resultMetadata),
+        readLongLineTruncationNotice(output)
+      ].filter((notice) => !!notice);
       return {
         success: {
-          path: readPath,
-          content: notice ? `${content}
+          path: listing?.directory || readPath,
+          content: notices.length > 0 ? `${content}
 
-${notice}` : content,
+${notices.join("\n\n")}` : content,
           total_lines: totalLines,
-          file_size: readFileSize(statPath),
+          file_size: listing ? 0 : readFileSize(statPath),
           truncated: readOutputTruncated(resultMetadata, outputMetadata, totalLines),
           range_applied: rangeApplied
         }
@@ -11867,19 +12362,44 @@ ${notice}` : content,
     case "grep_result": {
       if (error)
         return { error: { error } };
-      const files = extractPathLines(output);
       const cwd = resultRoot ?? "";
+      const pattern = str(resultMetadata?.pattern) ?? "";
+      const requestedPath = str(resultMetadata?.path) ?? cwd;
+      const requestedMode = str(resultMetadata?.output_mode);
+      const parsedContent = parseOpenCodeGrepContent(output, resultRoot);
+      const content = requestedMode === "files_with_matches" ? void 0 : parsedContent;
+      if (content) {
+        return {
+          success: {
+            pattern,
+            path: requestedPath,
+            output_mode: "content",
+            workspace_results: {
+              [cwd]: {
+                content: {
+                  matches: content.matches,
+                  total_lines: content.totalMatchedLines,
+                  total_matched_lines: content.totalMatchedLines,
+                  client_truncated: content.truncated,
+                  ripgrep_truncated: false
+                }
+              }
+            }
+          }
+        };
+      }
+      const files = extractGroundedPaths(output, resultRoot);
       return {
         success: {
-          pattern: "",
-          path: cwd,
+          pattern,
+          path: requestedPath,
           output_mode: "files_with_matches",
           workspace_results: {
             [cwd]: {
               files: {
                 files,
                 total_files: files.length,
-                client_truncated: false
+                client_truncated: parsedContent?.truncated ?? false
               }
             }
           }
@@ -11906,19 +12426,20 @@ ${notice}` : content,
       if (error)
         return { error: { error } };
       const content = unwrapReadOutput(output);
-      const truncation = readTruncationMessage(output, content);
+      const truncation = readTruncationMessage(output, content, resultMetadata);
       return { success: { output: content, ...truncation ? { truncation } : {} } };
     }
     case "shell_result": {
       const command = str(resultMetadata?.command) ?? "";
       const workingDirectory = str(resultMetadata?.working_directory) ?? "";
+      const stdout = groundShellPathText(output, shellPathRoot(resultMetadata, resultRoot));
       if (error) {
         return {
           failure: {
             command,
             working_directory: workingDirectory,
             exit_code: 1,
-            stdout: output || "",
+            stdout: stdout || "",
             stderr: error,
             aborted: false
           }
@@ -11939,7 +12460,7 @@ ${notice}` : content,
             command: shellOutcome.command || command,
             working_directory: shellOutcome.workingDirectory || workingDirectory,
             exit_code: 0,
-            stdout: output,
+            stdout,
             shell_id: shellOutcome.shellId,
             pid: shellOutcome.pid,
             ms_to_wait: shellOutcome.msToWait,
@@ -11955,18 +12476,29 @@ ${notice}` : content,
           command,
           working_directory: workingDirectory,
           exit_code: exitCode,
-          stdout: output
+          stdout
         }
       };
     }
     case "pi_bash_result":
+      if (error)
+        return { error: { error } };
+      return { success: { output: groundShellPathText(output, shellPathRoot(resultMetadata, resultRoot)) } };
     case "pi_edit_result":
-    case "pi_grep_result":
-    case "pi_find_result":
-    case "pi_ls_result":
       if (error)
         return { error: { error } };
       return { success: { output } };
+    case "pi_grep_result":
+    case "pi_find_result":
+      if (error)
+        return { error: { error } };
+      return { success: { output: groundSearchOutput(output, resultRoot) } };
+    case "pi_ls_result": {
+      if (error)
+        return { error: { error } };
+      const listing = parseOpenCode2DirectoryListing(output, resultRoot);
+      return { success: { output: listing?.text ?? groundSearchOutput(output, resultRoot) } };
+    }
     case "delete_result":
       if (error)
         return { error: { path: "", error } };
@@ -12009,17 +12541,25 @@ ${notice}` : content,
     case "ls_result": {
       if (error)
         return { error: { path: "", error } };
-      const rootPath = resultRoot ?? "";
-      const entries = extractPathLines(output);
+      const listing = parseOpenCode2DirectoryListing(output, resultRoot);
+      const rootPath = listing?.directory || resultRoot || "";
+      const entries = listing ? listing.entries : extractGroundedPaths(output, resultRoot);
+      const directories = listing?.directories ?? [];
+      const files = listing?.files ?? entries;
       return {
         success: {
           directory_tree_root: {
             abs_path: rootPath,
-            children_dirs: [],
-            children_files: entries.map((name14) => ({
-              name: name14.includes("/") ? name14.slice(name14.lastIndexOf("/") + 1) : name14
+            children_dirs: directories.map((entry) => ({
+              abs_path: stripTrailingPathSeparator(entry),
+              children_dirs: [],
+              children_files: [],
+              num_files: 0
             })),
-            num_files: entries.length
+            children_files: files.map((entry) => ({
+              name: listedEntryName(entry)
+            })),
+            num_files: files.length
           }
         }
       };
@@ -12027,15 +12567,32 @@ ${notice}` : content,
     case "mcp_result": {
       if (error)
         return { error: { error } };
+      if (toolName === "grep" || toolName === "glob") {
+        return {
+          success: {
+            content: [{ text: { text: groundSearchOutput(output, resultRoot) } }],
+            is_error: false
+          }
+        };
+      }
       if (toolName !== "read") {
         return { success: { content: [{ text: { text: output } }], is_error: false } };
       }
-      const notice = readTruncationNotice(output);
+      const listing = parseOpenCode2DirectoryListing(output, resultRoot);
+      if (listing) {
+        return {
+          success: { content: [{ text: { text: listing.text } }], is_error: false }
+        };
+      }
+      const notices = [
+        readTruncationNotice(output, resultMetadata),
+        readLongLineTruncationNotice(output)
+      ].filter((notice) => !!notice);
       return {
         success: {
           content: [
             { text: { text: unwrapReadOutput(output) } },
-            ...notice ? [{ text: { text: notice } }] : []
+            ...notices.map((notice) => ({ text: { text: notice } }))
           ],
           is_error: false
         }
@@ -12098,7 +12655,19 @@ function readEnvelopeFooter(output) {
     return output;
   return output.slice(start + 2, close);
 }
-function parseOpenCodeReadMetadata(output) {
+function parseOpenCodeReadMetadata(output, resultMetadata) {
+  const opencode2 = parseOpenCode2FileRead(output, resultMetadata);
+  if (opencode2) {
+    return {
+      ...opencode2.startLine !== void 0 ? { startLine: opencode2.startLine } : {},
+      ...opencode2.endLine !== void 0 ? { endLine: opencode2.endLine } : {},
+      ...opencode2.totalLines !== void 0 ? { totalLines: opencode2.totalLines } : {},
+      ...opencode2.nextOffset !== void 0 ? { nextOffset: opencode2.nextOffset } : {},
+      outputCapped: opencode2.outputCapped,
+      hostTruncated: opencode2.hostTruncated,
+      ...opencode2.truncatedLines.length > 0 ? { truncatedLines: opencode2.truncatedLines } : {}
+    };
+  }
   const footer = readEnvelopeFooter(output);
   const showing = /Showing lines (\d+)-(\d+)(?: of (\d+))?\./.exec(footer);
   if (showing) {
@@ -12117,7 +12686,7 @@ function parseOpenCodeReadMetadata(output) {
 function restoreCompleteReadTerminator(content, readPath, metadata, resultMetadata, workspaceRoot) {
   if (!readPath || metadata.totalLines === void 0 || metadata.startLine !== void 0 || metadata.endLine !== void 0 || num(resultMetadata?.offset) !== void 0 || num(resultMetadata?.limit) !== void 0 || content.endsWith("\n"))
     return content;
-  const absolute = path5.isAbsolute(readPath) ? readPath : path5.resolve(workspaceRoot ?? process.cwd(), readPath);
+  const absolute = isAbsoluteToolPath(readPath) ? readPath : joinToolPath(workspaceRoot ?? process.cwd(), readPath);
   let fd;
   try {
     fd = fs4.openSync(absolute, "r");
@@ -12144,8 +12713,8 @@ function restoreCompleteReadTerminator(content, readPath, metadata, resultMetada
   }
   return content;
 }
-function readTruncationSummary(output) {
-  const meta = parseOpenCodeReadMetadata(output);
+function readTruncationSummary(output, resultMetadata) {
+  const meta = parseOpenCodeReadMetadata(output, resultMetadata);
   if (meta.startLine === void 0 || meta.endLine === void 0)
     return void 0;
   if (meta.totalLines !== void 0 && meta.endLine >= meta.totalLines && !meta.outputCapped)
@@ -12153,13 +12722,13 @@ function readTruncationSummary(output) {
   return {
     startLine: meta.startLine,
     endLine: meta.endLine,
-    nextOffset: meta.endLine + 1,
+    nextOffset: meta.nextOffset ?? meta.endLine + 1,
     capped: meta.outputCapped === true,
     ...meta.totalLines !== void 0 ? { totalLines: meta.totalLines } : {}
   };
 }
 function readTruncationNotice(output, resultMetadata) {
-  const summary = readTruncationSummary(output);
+  const summary = readTruncationSummary(output, resultMetadata);
   if (!summary)
     return void 0;
   const rangeRequested = num(resultMetadata?.offset) !== void 0 || num(resultMetadata?.limit) !== void 0;
@@ -12168,17 +12737,29 @@ function readTruncationNotice(output, resultMetadata) {
   const range = summary.totalLines !== void 0 ? `lines ${summary.startLine}-${summary.endLine} of ${summary.totalLines}` : `lines ${summary.startLine}-${summary.endLine}`;
   return `[Partial read: the content above is ${range}` + (summary.capped ? ", capped at the host's 50 KB output limit" : "") + `. It is NOT the complete file. Continue with offset=${summary.nextOffset} before acting on the whole file; writing the content above back would delete everything after line ${summary.endLine}.]`;
 }
-function readTruncationMessage(output, content) {
-  const summary = readTruncationSummary(output);
-  if (!summary)
+function readLongLineTruncationNotice(output) {
+  const lines = parseOpenCodeReadMetadata(output).truncatedLines;
+  if (!lines || lines.length === 0)
+    return void 0;
+  const displayed = lines.slice(0, 8).join(", ");
+  const remainder = lines.length > 8 ? ` and ${lines.length - 8} more` : "";
+  return `[Partial read: OpenCode shortened ${lines.length === 1 ? "line" : "lines"} ${displayed}${remainder} to ${OPENCODE2_READ_MAX_LINE_CHARS} characters. It is NOT the complete file. Use a byte-preserving read method to inspect the full line content before acting on the whole file; writing the content above back would lose data.]`;
+}
+function readTruncationMessage(output, content, resultMetadata) {
+  const summary = readTruncationSummary(output, resultMetadata);
+  const longLines = parseOpenCodeReadMetadata(output, resultMetadata).truncatedLines;
+  if (!summary && (!longLines || longLines.length === 0))
+    return void 0;
+  const rangeRequested = num(resultMetadata?.offset) !== void 0 || num(resultMetadata?.limit) !== void 0;
+  if (summary && rangeRequested && !summary.capped && (!longLines || longLines.length === 0))
     return void 0;
   return {
     truncated: true,
-    truncated_by: summary.capped ? "bytes" : "lines",
-    ...summary.totalLines !== void 0 ? { total_lines: summary.totalLines } : {},
-    output_lines: Math.max(0, summary.endLine - summary.startLine + 1),
+    truncated_by: summary?.capped ? "bytes" : longLines?.length ? "characters" : "lines",
+    ...summary?.totalLines !== void 0 ? { total_lines: summary.totalLines } : {},
+    output_lines: summary ? Math.max(0, summary.endLine - summary.startLine + 1) : countLines(content),
     output_bytes: Buffer.byteLength(content, "utf8"),
-    ...summary.capped ? { max_bytes: OPENCODE_READ_MAX_BYTES } : {}
+    ...summary?.capped ? { max_bytes: OPENCODE_READ_MAX_BYTES } : {}
   };
 }
 function readRangeApplied(resultMetadata, totalLines) {
@@ -12192,8 +12773,15 @@ function readRangeApplied(resultMetadata, totalLines) {
   return startLine < 0 || startLine <= totalLines;
 }
 function readOutputTruncated(resultMetadata, outputMetadata, totalLines) {
+  if (outputMetadata.truncatedLines && outputMetadata.truncatedLines.length > 0)
+    return true;
   if (outputMetadata.outputCapped)
     return true;
+  if (outputMetadata.hostTruncated) {
+    const rangeRequested = num(resultMetadata?.offset) !== void 0 || num(resultMetadata?.limit) !== void 0;
+    if (!rangeRequested)
+      return true;
+  }
   const returnedEnd = outputMetadata.endLine;
   if (returnedEnd === void 0 || totalLines === 0)
     return false;
@@ -12204,6 +12792,14 @@ function readOutputTruncated(resultMetadata, outputMetadata, totalLines) {
     return false;
   const expectedEnd = limit === void 0 ? totalLines : Math.min(totalLines, Math.max(1, startLine) + limit - 1);
   return returnedEnd < expectedEnd;
+}
+function listedEntryName(entry) {
+  const trimmed = stripTrailingPathSeparator(entry);
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+}
+function stripTrailingPathSeparator(entry) {
+  return entry.endsWith("/") || entry.endsWith("\\") ? entry.slice(0, -1) : entry;
 }
 function readFileSize(filePath) {
   if (!filePath)
@@ -12397,7 +12993,7 @@ function descriptorsFromFlatTools(value) {
     tools
   }));
 }
-var CUSTOM_WEBSEARCH_TOOL, CUSTOM_WEBFETCH_TOOL, CUSTOM_LIST_MCP_RESOURCES_TOOL, CUSTOM_READ_MCP_RESOURCE_TOOL, WEB_ALIAS_RULES, COLLISION_SAFE_ALIASES, cursorToolToOpencode, CURSOR_INTERNAL_KEYS, PRESERVE_EMPTY_STRING_KEYS, CURSOR_SUBAGENT_TYPE_TO_OPENCODE, SUBAGENT_CATALOG_MARKER, GENERIC_CURSOR_SUBAGENT_TYPES, MAX_EDIT_SOURCE_BYTES, WIDE_TEXT_ENCODING, OPENCODE_READ_MAX_BYTES;
+var OPENCODE_1_TOOL_DIALECT, CUSTOM_WEBSEARCH_TOOL, CUSTOM_WEBFETCH_TOOL, CUSTOM_LIST_MCP_RESOURCES_TOOL, CUSTOM_READ_MCP_RESOURCE_TOOL, WEB_ALIAS_RULES, COLLISION_SAFE_ALIASES, cursorToolToOpencode, CURSOR_INTERNAL_KEYS, PRESERVE_EMPTY_STRING_KEYS, CURSOR_SUBAGENT_TYPE_TO_OPENCODE, SUBAGENT_CATALOG_MARKER, SUBAGENT_INLINE_MARKER, GENERIC_CURSOR_SUBAGENT_TYPES, MAX_EDIT_SOURCE_BYTES, WIDE_TEXT_ENCODING, OPENCODE2_READ_TRUNCATION, OPENCODE2_READ_MAX_LINES, OPENCODE2_READ_MAX_LINE_CHARS, OPENCODE2_READ_LINE_TRUNCATION, OPENCODE2_MAX_RENDERED_LINE_BYTES, OPENCODE_GREP_LINE, OPENCODE_READ_MAX_BYTES;
 var init_tools = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/tools.js"() {
     init_messages();
@@ -12408,6 +13004,10 @@ var init_tools = __esm({
     init_exec_variants();
     init_apply_patch();
     init_shell_timeout();
+    OPENCODE_1_TOOL_DIALECT = {
+      filePathKey: "filePath",
+      shellTool: "bash"
+    };
     CUSTOM_WEBSEARCH_TOOL = "custom_websearch";
     CUSTOM_WEBFETCH_TOOL = "custom_webfetch";
     CUSTOM_LIST_MCP_RESOURCES_TOOL = "custom_list_mcp_resources";
@@ -12530,6 +13130,7 @@ var init_tools = __esm({
       security_review: "explore"
     };
     SUBAGENT_CATALOG_MARKER = "Available agent types and the tools they have access to:";
+    SUBAGENT_INLINE_MARKER = "Available subagents:";
     GENERIC_CURSOR_SUBAGENT_TYPES = /* @__PURE__ */ new Set([
       "generalPurpose",
       "general-purpose",
@@ -12539,6 +13140,12 @@ var init_tools = __esm({
     ]);
     MAX_EDIT_SOURCE_BYTES = 50 * 1024 * 1024;
     WIDE_TEXT_ENCODING = /^utf-?(16|32)/;
+    OPENCODE2_READ_TRUNCATION = /^\[Output truncated\. Continue reading with offset:\s*(\d+)\]\s*$/;
+    OPENCODE2_READ_MAX_LINES = 2e3;
+    OPENCODE2_READ_MAX_LINE_CHARS = 2e3;
+    OPENCODE2_READ_LINE_TRUNCATION = `... (line truncated to ${OPENCODE2_READ_MAX_LINE_CHARS} chars)`;
+    OPENCODE2_MAX_RENDERED_LINE_BYTES = OPENCODE2_READ_MAX_LINE_CHARS * 3 + Buffer.byteLength(OPENCODE2_READ_LINE_TRUNCATION, "utf8") + 1;
+    OPENCODE_GREP_LINE = /^[ \t]+Line (\d+):[ \t]?(.*)$/;
     OPENCODE_READ_MAX_BYTES = 50 * 1024;
   }
 });
@@ -12978,16 +13585,36 @@ var init_git_diff = __esm({
 });
 
 // node_modules/cursor-opencode-provider/dist/protocol/workspace-grounding.js
-function appendWorkspaceRootGrounding(reason, workspaceRoot) {
+function appendWorkspaceRootGrounding(reason, workspaceRoot, options) {
   if (!workspaceRoot || !workspaceRoot.trim())
     return reason;
-  if (reason.includes("Workspace root:"))
-    return reason;
+  const pathSentence = options?.requireAbsolutePathArg ? ` ${ABSOLUTE_PATH_ARG}` : "";
+  if (reason.includes("Workspace root:")) {
+    if (!pathSentence || reason.includes("take `path` as an absolute path"))
+      return reason;
+    return `${reason}${pathSentence}`;
+  }
+  const note = `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.` + pathSentence;
+  if (!reason)
+    return note;
   return `${reason}
-Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`;
+${note}`;
 }
+function appendCheckpointUserGrounding(userText, workspaceRoot, options) {
+  const note = appendWorkspaceRootGrounding("", workspaceRoot, options);
+  if (!note)
+    return userText;
+  if (userText.includes("Workspace root:")) {
+    return appendWorkspaceRootGrounding(userText, workspaceRoot, options);
+  }
+  return userText ? `${userText}
+
+${note}` : note;
+}
+var ABSOLUTE_PATH_ARG;
 var init_workspace_grounding = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/workspace-grounding.js"() {
+    ABSOLUTE_PATH_ARG = "OpenCode file tools take `path` as an absolute path under this root. Do not pass a project-relative path, and do not invent a different absolute prefix.";
   }
 });
 
@@ -13407,6 +14034,12 @@ function setActiveCursorMode(sessionKey, targetModeId, options = {}) {
     firstTurn: true,
     bridgedPlanEntered: options.bridgedPlanEntered === true
   });
+  while (activeCursorModeBySession.size > MAX_ACTIVE_CURSOR_MODES) {
+    const oldest = activeCursorModeBySession.keys().next().value;
+    if (!oldest)
+      break;
+    activeCursorModeBySession.delete(oldest);
+  }
 }
 function getActiveCursorMode(sessionKey) {
   if (!sessionKey)
@@ -13537,7 +14170,7 @@ function takeActiveCursorModeReminder(sessionKey, options = {}) {
     state.firstTurn = false;
   return reminder;
 }
-var SWITCH_MODE_RESULT_FIELD, USER_REJECTED_REASON, MISSING_QUERY_REASON2, MISSING_ARGS_REASON2, MISSING_TARGET_REASON, PLAN_EXIT_UNAVAILABLE_REASON, SWITCH_MODE_EXIT_QUESTION, SWITCH_MODE_EXIT_HEADER, SWITCH_MODE_EXIT_YES, SWITCH_MODE_EXIT_NO, activeCursorModeBySession;
+var SWITCH_MODE_RESULT_FIELD, USER_REJECTED_REASON, MISSING_QUERY_REASON2, MISSING_ARGS_REASON2, MISSING_TARGET_REASON, PLAN_EXIT_UNAVAILABLE_REASON, SWITCH_MODE_EXIT_QUESTION, SWITCH_MODE_EXIT_HEADER, SWITCH_MODE_EXIT_YES, SWITCH_MODE_EXIT_NO, activeCursorModeBySession, MAX_ACTIVE_CURSOR_MODES;
 var init_switch_mode = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/switch-mode.js"() {
     init_ask_question();
@@ -13553,6 +14186,7 @@ var init_switch_mode = __esm({
     SWITCH_MODE_EXIT_YES = "Yes";
     SWITCH_MODE_EXIT_NO = "No";
     activeCursorModeBySession = /* @__PURE__ */ new Map();
+    MAX_ACTIVE_CURSOR_MODES = 256;
   }
 });
 
@@ -13599,11 +14233,121 @@ function mapTodos(raw) {
     };
   });
 }
+function snapshotMirroredTodos(todos) {
+  if (!Array.isArray(todos))
+    return void 0;
+  return mapTodos(todos).filter((t) => {
+    const id = typeof t.id === "string" ? t.id : "";
+    return id.length > 0 && id !== "plan";
+  });
+}
+function snapshotMirroredTodosFromReadOutput(output) {
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return void 0;
+  }
+  const list = Array.isArray(parsed) ? parsed : asRecord3(parsed)?.todos ?? void 0;
+  if (!Array.isArray(list))
+    return void 0;
+  return snapshotMirroredTodos(list);
+}
+function applyTodoMerge(prior, patch) {
+  const rawPatch = Array.isArray(patch) ? patch : [];
+  const mappedPatch = mapTodos(patch);
+  const byId = /* @__PURE__ */ new Map();
+  const byContent = /* @__PURE__ */ new Map();
+  const consumedPatchIds = /* @__PURE__ */ new Set();
+  const appendedPatchIds = /* @__PURE__ */ new Set();
+  for (const item of prior) {
+    const id = typeof item.id === "string" && item.id.length > 0 ? item.id : "";
+    if (!id)
+      continue;
+    const normalized = {
+      id,
+      content: typeof item.content === "string" ? item.content : "",
+      status: typeof item.status === "string" ? item.status : mapTodoStatus(item.status),
+      priority: typeof item.priority === "string" && item.priority ? item.priority : "medium"
+    };
+    byId.set(id, normalized);
+    const key = normalized.content.trim();
+    if (key && !byContent.has(key))
+      byContent.set(key, normalized);
+  }
+  const overlay = (target, item, raw) => {
+    const next = { ...target, id: target.id };
+    if (typeof raw.content === "string" && raw.content.length > 0) {
+      next.content = raw.content;
+    }
+    if (raw.status !== void 0 && raw.status !== null) {
+      next.status = String(item.status);
+    }
+    if (typeof raw.priority === "string" && raw.priority) {
+      next.priority = raw.priority;
+    }
+    return next;
+  };
+  for (let index = 0; index < mappedPatch.length; index++) {
+    const item = mappedPatch[index];
+    const raw = asRecord3(rawPatch[index]) ?? {};
+    const id = String(item.id);
+    const byIdMatch = byId.get(id);
+    if (byIdMatch) {
+      const merged = overlay(byIdMatch, item, raw);
+      byId.set(id, merged);
+      const oldKey = typeof byIdMatch.content === "string" ? byIdMatch.content.trim() : "";
+      const newKey = typeof merged.content === "string" ? merged.content.trim() : "";
+      if (oldKey && byContent.get(oldKey) === byIdMatch)
+        byContent.delete(oldKey);
+      if (newKey && !byContent.has(newKey))
+        byContent.set(newKey, merged);
+      continue;
+    }
+    const contentKey = typeof raw.content === "string" && raw.content.trim().length > 0 ? raw.content.trim() : "";
+    const byContentMatch = contentKey ? byContent.get(contentKey) : void 0;
+    if (byContentMatch) {
+      const merged = overlay(byContentMatch, item, raw);
+      byId.set(String(byContentMatch.id), merged);
+      if (contentKey)
+        byContent.set(contentKey, merged);
+      consumedPatchIds.add(id);
+      continue;
+    }
+    if (!contentKey)
+      continue;
+    byId.set(id, item);
+    byContent.set(contentKey, item);
+    appendedPatchIds.add(id);
+  }
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of prior) {
+    const id = typeof item.id === "string" ? item.id : "";
+    if (!id || seen.has(id))
+      continue;
+    const next = byId.get(id);
+    if (next) {
+      out.push(next);
+      seen.add(id);
+    }
+  }
+  for (const item of mappedPatch) {
+    const id = String(item.id);
+    if (seen.has(id) || consumedPatchIds.has(id))
+      continue;
+    if (!appendedPatchIds.has(id))
+      continue;
+    out.push(item);
+    seen.add(id);
+  }
+  return out;
+}
 function unwrapArgs(variantPayload) {
   const nested = asRecord3(variantPayload.args);
   return nested ?? variantPayload;
 }
-function parseDisplayToolCall(callId, toolCall) {
+function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
   if (!toolCall || !callId)
     return void 0;
   const variant = findToolVariant(toolCall);
@@ -13632,7 +14376,8 @@ function parseDisplayToolCall(callId, toolCall) {
     const completedTodos = Array.isArray(success?.todos) ? success.todos : void 0;
     const isMerge = variant === "update_todos_tool_call" && args.merge === true;
     const sourceTodos = completedTodos ?? (!isMerge ? args.todos : void 0);
-    const todos = mapTodos(sourceTodos);
+    const canMergeFromPrior = sourceTodos === void 0 && isMerge && Array.isArray(priorMirroredTodos) && priorMirroredTodos.length > 0;
+    const todos = canMergeFromPrior ? applyTodoMerge(priorMirroredTodos, args.todos) : mapTodos(sourceTodos);
     if (variant === "create_plan_tool_call") {
       const overview = typeof args.overview === "string" ? args.overview.trim() : "";
       const plan = typeof args.plan === "string" ? args.plan.trim() : "";
@@ -13651,7 +14396,16 @@ function parseDisplayToolCall(callId, toolCall) {
       variant,
       preferredToolName: "todowrite",
       args: { todos },
-      bridgeable: variant === "create_plan_tool_call" ? todos.length > 0 : Array.isArray(sourceTodos)
+      bridgeable: variant === "create_plan_tool_call" ? todos.length > 0 : Array.isArray(sourceTodos) || canMergeFromPrior
+    };
+  }
+  if (variant === "read_todos_tool_call") {
+    return {
+      callId,
+      variant,
+      preferredToolName: "todoread",
+      args: {},
+      bridgeable: true
     };
   }
   if (variant === "edit_tool_call") {
@@ -13773,6 +14527,9 @@ function resolveBridgedOpenCodeToolCall(display, advertised) {
       mapped.args = {
         todos: mapTodos(display.args.todos ?? mapped.args.todos)
       };
+    }
+    if (toolName === "todoread") {
+      mapped.args = {};
     }
     return {
       toolName: mapped.toolName,
@@ -14021,6 +14778,7 @@ var init_tool_call_bridge = __esm({
     TOOL_CALL_VARIANTS = Object.keys(VARIANT_TO_OPENCODE);
     DISPLAY_STATE_MIRROR_VARIANTS = /* @__PURE__ */ new Set([
       "update_todos_tool_call",
+      "read_todos_tool_call",
       "create_plan_tool_call"
     ]);
   }
@@ -15094,6 +15852,10 @@ function planPathFromUri(planUri) {
 }
 function setPlanExecutionKickoff(fn) {
   kickoff = fn;
+  if (!fn) {
+    pending.clear();
+    warnings.clear();
+  }
 }
 function hasPlanExecutionKickoff() {
   return kickoff !== void 0;
@@ -15113,6 +15875,13 @@ function queuePlanExecutionKickoff(input2) {
     attempts: 0
   });
   warnings.delete(sessionID);
+  while (pending.size > MAX_PENDING_PLAN_KICKOFFS) {
+    const oldest = pending.keys().next().value;
+    if (!oldest)
+      break;
+    pending.delete(oldest);
+    warnings.delete(oldest);
+  }
   trace(`plan-execution-kickoff: pending sessionID=${sessionID} cursorSessionID=${input2.cursorSessionID ?? ""} planPath=${planPath}`);
   return true;
 }
@@ -15128,7 +15897,9 @@ async function flushPlanExecutionKickoff(sessionID, options = {}) {
     return false;
   }
   if (state.cursorSessionID && options.cursorSessionID && state.cursorSessionID !== options.cursorSessionID) {
-    trace(`plan-execution-kickoff: skipped stale Run sessionID=${key} owner=${state.cursorSessionID} terminal=${options.cursorSessionID}`);
+    pending.delete(key);
+    warnings.delete(key);
+    trace(`plan-execution-kickoff: discarded stale Run sessionID=${key} owner=${state.cursorSessionID} terminal=${options.cursorSessionID}`);
     return false;
   }
   const run = kickoff;
@@ -15175,27 +15946,85 @@ function planExecutionKickoffState(sessionID) {
   const state = key ? pending.get(key) : void 0;
   return state ? { ...state } : void 0;
 }
-var kickoff, pending, warnings;
+var kickoff, pending, warnings, MAX_PENDING_PLAN_KICKOFFS;
 var init_plan_execution_kickoff = __esm({
   "node_modules/cursor-opencode-provider/dist/plan-execution-kickoff.js"() {
     init_debug();
     pending = /* @__PURE__ */ new Map();
     warnings = /* @__PURE__ */ new Map();
+    MAX_PENDING_PLAN_KICKOFFS = 256;
+  }
+});
+
+// node_modules/cursor-opencode-provider/dist/host-agent-mode.js
+function queueHostAgentModeSwitch(input2) {
+  const sessionID = input2.sessionID.trim();
+  const targetModeID = input2.targetModeID.trim();
+  if (!switchHostAgent || !sessionID || !targetModeID)
+    return false;
+  pending2.set(sessionID, {
+    sessionID,
+    targetModeID,
+    ...input2.cursorSessionID ? { cursorSessionID: input2.cursorSessionID } : {},
+    attempts: 0
+  });
+  while (pending2.size > MAX_PENDING_HOST_AGENT_SWITCHES) {
+    const oldest = pending2.keys().next().value;
+    if (!oldest)
+      break;
+    pending2.delete(oldest);
+  }
+  trace(`host-agent-mode: pending sessionID=${sessionID} cursorSessionID=${input2.cursorSessionID ?? ""} target=${targetModeID}`);
+  return true;
+}
+async function flushHostAgentModeSwitch(sessionID, options = {}) {
+  const key = sessionID?.trim();
+  if (!key)
+    return false;
+  const state = pending2.get(key);
+  if (!state || !switchHostAgent)
+    return false;
+  if (options.terminal !== true || options.pumpActive || (options.pendingExecs ?? 0) > 0) {
+    return false;
+  }
+  if (state.cursorSessionID && options.cursorSessionID && state.cursorSessionID !== options.cursorSessionID) {
+    pending2.delete(key);
+    trace(`host-agent-mode: discarded stale Run sessionID=${key} owner=${state.cursorSessionID} terminal=${options.cursorSessionID}`);
+    return false;
+  }
+  state.attempts += 1;
+  try {
+    await switchHostAgent(state);
+    pending2.delete(key);
+    trace(`host-agent-mode: switched sessionID=${key} target=${state.targetModeID}`);
+    return true;
+  } catch (error) {
+    delete state.cursorSessionID;
+    trace(`host-agent-mode: FAILED sessionID=${key} target=${state.targetModeID} attempts=${state.attempts} err=${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+var switchHostAgent, pending2, MAX_PENDING_HOST_AGENT_SWITCHES;
+var init_host_agent_mode = __esm({
+  "node_modules/cursor-opencode-provider/dist/host-agent-mode.js"() {
+    init_debug();
+    pending2 = /* @__PURE__ */ new Map();
+    MAX_PENDING_HOST_AGENT_SWITCHES = 256;
   }
 });
 
 // node_modules/cursor-opencode-provider/dist/image-staging.js
 import { randomUUID } from "node:crypto";
 function prune(now) {
-  for (const [id, image] of pending2) {
+  for (const [id, image] of pending3) {
     if (now - image.createdAt > STAGED_IMAGE_TTL_MS)
-      pending2.delete(id);
+      pending3.delete(id);
   }
-  while (pending2.size >= MAX_PENDING) {
-    const oldest = pending2.keys().next().value;
+  while (pending3.size >= MAX_PENDING) {
+    const oldest = pending3.keys().next().value;
     if (oldest === void 0)
       break;
-    pending2.delete(oldest);
+    pending3.delete(oldest);
   }
 }
 function stageCursorImage(input2, now = Date.now()) {
@@ -15204,7 +16033,7 @@ function stageCursorImage(input2, now = Date.now()) {
   }
   prune(now);
   const id = `cursor-image-${randomUUID()}`;
-  pending2.set(id, {
+  pending3.set(id, {
     id,
     path: input2.path,
     projectDir: input2.projectDir,
@@ -15216,21 +16045,21 @@ function stageCursorImage(input2, now = Date.now()) {
   return id;
 }
 function takePendingCursorImage(id, now = Date.now()) {
-  const image = pending2.get(id);
+  const image = pending3.get(id);
   if (!image)
     return void 0;
-  pending2.delete(id);
+  pending3.delete(id);
   if (now - image.createdAt > STAGED_IMAGE_TTL_MS)
     return void 0;
   return image;
 }
-var MAX_STAGED_IMAGE_BYTES, STAGED_IMAGE_TTL_MS, MAX_PENDING, pending2, StagedImageTooLargeError;
+var MAX_STAGED_IMAGE_BYTES, STAGED_IMAGE_TTL_MS, MAX_PENDING, pending3, StagedImageTooLargeError;
 var init_image_staging = __esm({
   "node_modules/cursor-opencode-provider/dist/image-staging.js"() {
     MAX_STAGED_IMAGE_BYTES = 50 * 1024 * 1024;
     STAGED_IMAGE_TTL_MS = 10 * 6e4;
     MAX_PENDING = 8;
-    pending2 = /* @__PURE__ */ new Map();
+    pending3 = /* @__PURE__ */ new Map();
     StagedImageTooLargeError = class extends Error {
       constructor(bytes) {
         super(`Generated image is ${bytes} bytes, above the ${MAX_STAGED_IMAGE_BYTES} byte limit`);
@@ -16693,6 +17522,10 @@ function encodeCacheFile(value) {
   }
   if (value.postCompactionRebase)
     writer.uint32(fieldTag(9, 0)).bool(true);
+  if (value.hostAgent)
+    writer.uint32(fieldTag(10, 2)).string(value.hostAgent);
+  if (value.systemPromptHash)
+    writer.uint32(fieldTag(11, 2)).string(value.systemPromptHash);
   return { protobufBytes: writer.finish(), requestContextBytes: requestContext.length };
 }
 function decodeProtobuf(data) {
@@ -16706,6 +17539,8 @@ function decodeProtobuf(data) {
   let requestContextBytes;
   const toolCatalog = [];
   let postCompactionRebase = false;
+  let hostAgent;
+  let systemPromptHash;
   while (reader.pos < reader.len) {
     const tag = reader.uint32();
     const wireType = tag & 7;
@@ -16755,6 +17590,16 @@ function decodeProtobuf(data) {
           throw new Error("invalid compaction marker");
         postCompactionRebase = reader.bool();
         break;
+      case 10:
+        if (wireType !== 2)
+          throw new Error("invalid host agent");
+        hostAgent = reader.string();
+        break;
+      case 11:
+        if (wireType !== 2)
+          throw new Error("invalid system prompt hash");
+        systemPromptHash = reader.string();
+        break;
       default:
         reader.skipType(wireType);
     }
@@ -16770,7 +17615,9 @@ function decodeProtobuf(data) {
     blobs,
     requestContext,
     toolCatalog,
-    postCompactionRebase
+    postCompactionRebase,
+    ...hostAgent ? { hostAgent } : {},
+    ...systemPromptHash ? { systemPromptHash } : {}
   };
 }
 function decodeCacheFile(compressed, expectedSessionKey) {
@@ -16908,16 +17755,16 @@ async function pruneConversationDirectory(cacheDir, now) {
 }
 async function initializeConversationPersistence(cacheDir, now = Date.now()) {
   const key = path18.resolve(cacheDir);
-  let pending3 = initializedRoots.get(key);
-  if (!pending3) {
-    pending3 = pruneConversationDirectory(key, now);
-    initializedRoots.set(key, pending3);
-    pending3.catch(() => {
-      if (initializedRoots.get(key) === pending3)
+  let pending4 = initializedRoots.get(key);
+  if (!pending4) {
+    pending4 = pruneConversationDirectory(key, now);
+    initializedRoots.set(key, pending4);
+    pending4.catch(() => {
+      if (initializedRoots.get(key) === pending4)
         initializedRoots.delete(key);
     });
   }
-  await pending3;
+  await pending4;
 }
 async function loadStore(cacheDir, sessionKey, now) {
   await initializeConversationPersistence(cacheDir, now);
@@ -16942,16 +17789,16 @@ async function loadStore(cacheDir, sessionKey, now) {
 async function getStore(cacheDir, sessionKey, now = Date.now()) {
   const root = path18.resolve(cacheDir);
   const key = `${root}\0${sessionKey}`;
-  let pending3 = stores.get(key);
-  if (!pending3) {
-    pending3 = loadStore(root, sessionKey, now);
-    stores.set(key, pending3);
-    pending3.catch(() => {
-      if (stores.get(key) === pending3)
+  let pending4 = stores.get(key);
+  if (!pending4) {
+    pending4 = loadStore(root, sessionKey, now);
+    stores.set(key, pending4);
+    pending4.catch(() => {
+      if (stores.get(key) === pending4)
         stores.delete(key);
     });
   }
-  return pending3;
+  return pending4;
 }
 async function loadPersistedConversation(cacheDir, sessionKey, now = Date.now()) {
   const store = await getStore(cacheDir, sessionKey, now);
@@ -17013,7 +17860,9 @@ async function hydrateConversationState(cacheDir, sessionKey) {
   return {
     conversationId: persisted.conversationId,
     postCompactionRebase: persisted.postCompactionRebase,
-    toolCatalog: structuredClone(persisted.toolCatalog)
+    toolCatalog: structuredClone(persisted.toolCatalog),
+    ...persisted.hostAgent ? { hostAgent: persisted.hostAgent } : {},
+    ...persisted.systemPromptHash ? { systemPromptHash: persisted.systemPromptHash } : {}
   };
 }
 async function persistConversationState(cacheDir, input2) {
@@ -17032,7 +17881,9 @@ async function persistConversationState(cacheDir, input2) {
     blobs,
     requestContext,
     toolCatalog: structuredClone(input2.toolCatalog ?? []),
-    postCompactionRebase: input2.postCompactionRebase
+    postCompactionRebase: input2.postCompactionRebase,
+    hostAgent: input2.hostAgent,
+    systemPromptHash: input2.systemPromptHash
   });
   trace(`conversation persistence: saved sessionKey=${input2.sessionKey} conversationId=${input2.conversationId} checkpoint=${checkpoint?.length ?? 0}B blobs=${blobCompaction.beforeCount}->${blobCompaction.afterCount} blobBytes=${blobCompaction.beforeBytes}->${blobCompaction.afterBytes}` + (blobCompaction.fallbackReason ? ` compactionFallback=${blobCompaction.fallbackReason}` : ""));
 }
@@ -17313,17 +18164,17 @@ var init_session = __esm({
         const key = this.key(sessionId, execId);
         const session = this.byExecId.get(key);
         if (session) {
-          const pending3 = session.pending.get(execId);
+          const pending4 = session.pending.get(execId);
           const legacyExpiresAt = session.expiresAt;
-          if (!pending3 || session.closed || session.stream.isClosed() || typeof legacyExpiresAt === "number" && this.now() >= legacyExpiresAt) {
+          if (!pending4 || session.closed || session.stream.isClosed() || typeof legacyExpiresAt === "number" && this.now() >= legacyExpiresAt) {
             this.byExecId.delete(key);
             if (!session.closed)
               this.close(session, "remote-clean-close");
-          } else if (this.hardDeadlineExpired(session, pending3)) {
+          } else if (this.hardDeadlineExpired(session, pending4)) {
             this.close(session, "hard-cap-expired");
-          } else if (pending3.state === "pending") {
-            return { kind: "deliverable", session, pending: pending3 };
-          } else if (pending3.state === "claimed") {
+          } else if (pending4.state === "pending") {
+            return { kind: "deliverable", session, pending: pending4 };
+          } else if (pending4.state === "claimed") {
             return { kind: "duplicate", reason: "in-flight" };
           } else {
             return { kind: "duplicate", reason: "delivered" };
@@ -17348,9 +18199,9 @@ var init_session = __esm({
         };
       }
       deliverClaim(claim, frames) {
-        const { session, execId, pending: pending3 } = claim;
+        const { session, execId, pending: pending4 } = claim;
         const key = this.key(session.sessionId, execId);
-        if (session.closed || this.byExecId.get(key) !== session || session.pending.get(execId) !== pending3) {
+        if (session.closed || this.byExecId.get(key) !== session || session.pending.get(execId) !== pending4) {
           const current = this.classify(session.sessionId, execId);
           if (current.kind === "duplicate")
             return { ...current, framesWritten: 0 };
@@ -17358,20 +18209,20 @@ var init_session = __esm({
             return { ...current, framesWritten: 0 };
           return { kind: "missing", reason: "missing-process-local-state", framesWritten: 0 };
         }
-        if (pending3.state !== "claimed") {
+        if (pending4.state !== "claimed") {
           return {
             kind: "duplicate",
-            reason: pending3.state === "delivered" ? "delivered" : "in-flight",
+            reason: pending4.state === "delivered" ? "delivered" : "in-flight",
             framesWritten: 0
           };
         }
-        if (this.hardDeadlineExpired(session, pending3)) {
+        if (this.hardDeadlineExpired(session, pending4)) {
           this.close(session, "hard-cap-expired");
           return { kind: "terminal", reason: "hard-cap-expired", framesWritten: 0 };
         }
         let framesWritten = 0;
         try {
-          if (!pending3.bridged && frames.length === 0) {
+          if (!pending4.bridged && frames.length === 0) {
             throw new CursorProtocolError("No result frames were produced");
           }
           for (const frame of frames) {
@@ -17383,7 +18234,7 @@ var init_session = __esm({
           this.close(session, reason);
           return { kind: "terminal", reason, framesWritten };
         }
-        pending3.state = "delivered";
+        pending4.state = "delivered";
         this.putTombstone(key, "delivered");
         session.pending.delete(execId);
         this.byExecId.delete(key);
@@ -17501,6 +18352,7 @@ var init_session = __esm({
         session.pumpOwner = null;
         session.pumpActive = false;
         session.displayToolCalls?.clear();
+        session.mirroredTodos = void 0;
         session.blobs?.clear();
         this.sessions.delete(session);
         if (session.openCodeSessionId && this.byOpenCodeSessionId.get(session.openCodeSessionId) === session) {
@@ -17537,7 +18389,7 @@ var init_session = __esm({
       }
       sweepHardDeadlines() {
         for (const session of [...this.sessions]) {
-          if (!session.closed && [...session.pending.values()].some((pending3) => this.hardDeadlineExpired(session, pending3))) {
+          if (!session.closed && [...session.pending.values()].some((pending4) => this.hardDeadlineExpired(session, pending4))) {
             this.close(session, "hard-cap-expired");
           }
         }
@@ -17554,21 +18406,21 @@ var init_session = __esm({
         }
         this.close(session, reason, event.kind === "remote-error" ? event.error : void 0);
       }
-      refreshHardDeadline(session, pending3) {
+      refreshHardDeadline(session, pending4) {
         if (!session.openCodeSessionId)
-          return pending3.hardDeadlineAt;
+          return pending4.hardDeadlineAt;
         const activityAt = this.activitySource.lastActivityAt(session.openCodeSessionId);
-        if (activityAt === void 0 || activityAt <= pending3.registeredAt)
-          return pending3.hardDeadlineAt;
+        if (activityAt === void 0 || activityAt <= pending4.registeredAt)
+          return pending4.hardDeadlineAt;
         const renewedDeadline = activityAt + session.policy.hardCapMs;
-        if (renewedDeadline > pending3.hardDeadlineAt) {
-          pending3.hardDeadlineAt = renewedDeadline;
+        if (renewedDeadline > pending4.hardDeadlineAt) {
+          pending4.hardDeadlineAt = renewedDeadline;
           trace("continuation lease renewed from OpenCode session activity");
         }
-        return pending3.hardDeadlineAt;
+        return pending4.hardDeadlineAt;
       }
-      hardDeadlineExpired(session, pending3) {
-        return this.now() >= this.refreshHardDeadline(session, pending3);
+      hardDeadlineExpired(session, pending4) {
+        return this.now() >= this.refreshHardDeadline(session, pending4);
       }
       scheduleHardDeadline(session) {
         if (session.hardDeadlineTimer)
@@ -17576,13 +18428,13 @@ var init_session = __esm({
         session.hardDeadlineTimer = null;
         if (session.closed || session.pending.size === 0)
           return;
-        const earliest = Math.min(...[...session.pending.values()].map((pending3) => this.refreshHardDeadline(session, pending3)));
+        const earliest = Math.min(...[...session.pending.values()].map((pending4) => this.refreshHardDeadline(session, pending4)));
         const delayMs = Math.max(0, earliest - this.now());
         const timer = this.setTimer(() => {
           session.hardDeadlineTimer = null;
           if (session.closed)
             return;
-          if ([...session.pending.values()].some((pending3) => this.hardDeadlineExpired(session, pending3))) {
+          if ([...session.pending.values()].some((pending4) => this.hardDeadlineExpired(session, pending4))) {
             this.close(session, "hard-cap-expired");
           } else {
             this.scheduleHardDeadline(session);
@@ -17975,11 +18827,16 @@ async function fetchModels(token, options = {}) {
   const raw = await unaryAvailableModels(token, options);
   return mapAvailableModelsResponse(raw);
 }
-async function refreshModelCache(cacheDir, fetcher) {
+async function refreshModelCache(cacheDir, fetcher, options = {}) {
   const key = path19.resolve(cacheDir);
   const existing = refreshesByDirectory.get(key);
-  if (existing)
-    return existing;
+  if (existing) {
+    if (!options.forceAfterInflight)
+      return existing;
+    await existing.catch(() => {
+    });
+    return refreshModelCache(cacheDir, fetcher, options);
+  }
   const refresh = (async () => {
     const models = await fetcher();
     await writeCache(cacheDir, {
@@ -17998,9 +18855,10 @@ async function refreshModelCache(cacheDir, fetcher) {
   }
 }
 async function discoverModels(token, cacheDir, options = {}) {
+  const { forceRefresh = false, ...fetchOptions } = options;
   const cached = await readCache(cacheDir);
-  const refresh = () => refreshModelCache(cacheDir, () => fetchModels(token, options));
-  if (cached && isCacheFresh2(cached)) {
+  const refresh = () => refreshModelCache(cacheDir, () => fetchModels(token, fetchOptions), { forceAfterInflight: forceRefresh });
+  if (!forceRefresh && cached && isCacheFresh2(cached)) {
     void refresh().catch(() => {
     });
     return cached.models;
@@ -18008,7 +18866,9 @@ async function discoverModels(token, cacheDir, options = {}) {
   if (cached) {
     try {
       return await refresh();
-    } catch {
+    } catch (error) {
+      if (forceRefresh)
+        throw error;
       return cached.models;
     }
   }
@@ -19676,12 +20536,12 @@ async function resolveBearerToken(input2) {
     _apiKeyTokenCache.set(input2.apiKey, pair);
     return pair.accessToken;
   }
-  const pending3 = refreshOrExchange();
-  inflightBearer.set(inflightKey, pending3);
+  const pending4 = refreshOrExchange();
+  inflightBearer.set(inflightKey, pending4);
   try {
-    return await pending3;
+    return await pending4;
   } finally {
-    if (inflightBearer.get(inflightKey) === pending3)
+    if (inflightBearer.get(inflightKey) === pending4)
       inflightBearer.delete(inflightKey);
   }
 }
@@ -20027,6 +20887,28 @@ function snapshotToolCatalog(sessionKey) {
     return [];
   return structuredClone(toolCatalogBySession.get(sessionKey) ?? []);
 }
+function rememberMirroredTodos(sessionKey, todos) {
+  if (!sessionKey)
+    return;
+  mirroredTodosBySession.delete(sessionKey);
+  mirroredTodosBySession.set(sessionKey, todos.map((t) => ({ ...t })));
+  while (mirroredTodosBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = mirroredTodosBySession.keys().next().value;
+    if (!oldest)
+      break;
+    mirroredTodosBySession.delete(oldest);
+  }
+}
+function snapshotMirroredTodosBySession(sessionKey) {
+  if (!sessionKey)
+    return void 0;
+  const todos = mirroredTodosBySession.get(sessionKey);
+  return todos ? todos.map((t) => ({ ...t })) : void 0;
+}
+function storeMirroredTodos(session, todos) {
+  session.mirroredTodos = todos.map((t) => ({ ...t }));
+  rememberMirroredTodos(session.openCodeSessionId, session.mirroredTodos);
+}
 function rememberPostCompactionRebase(sessionKey) {
   postCompactionRebaseBySession.delete(sessionKey);
   postCompactionRebaseBySession.add(sessionKey);
@@ -20036,6 +20918,30 @@ function rememberPostCompactionRebase(sessionKey) {
       break;
     postCompactionRebaseBySession.delete(oldest);
   }
+}
+function normalizePromptIdentity(value) {
+  const hostAgent = value.hostAgent?.trim();
+  const systemPromptHash = value.systemPromptHash?.trim();
+  return {
+    ...hostAgent ? { hostAgent } : {},
+    ...systemPromptHash ? { systemPromptHash } : {}
+  };
+}
+function rememberPromptIdentity(sessionKey, value) {
+  const normalized = normalizePromptIdentity(value);
+  if (!normalized.hostAgent && !normalized.systemPromptHash)
+    return;
+  promptIdentityBySession.delete(sessionKey);
+  promptIdentityBySession.set(sessionKey, normalized);
+  while (promptIdentityBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = promptIdentityBySession.keys().next().value;
+    if (!oldest)
+      break;
+    promptIdentityBySession.delete(oldest);
+  }
+}
+function promptIdentityChanged(previous, current) {
+  return current.hostAgent !== void 0 && previous.hostAgent !== current.hostAgent || current.systemPromptHash !== void 0 && previous.systemPromptHash !== current.systemPromptHash;
 }
 function sentHistoryImageHashes(sessionKey) {
   if (!sessionKey)
@@ -20164,6 +21070,12 @@ async function doStreamImpl(modelId, options, callOptions) {
               setActiveCursorMode(activeSession.openCodeSessionId, "plan");
             }
           }
+          await flushHostAgentModeSwitch(activeSession.openCodeSessionId, {
+            cursorSessionID: activeSession.sessionId,
+            terminal: activeSession.closed,
+            pumpActive: activeSession.pumpActive || activeSession.pumpOwner != null,
+            pendingExecs: activeSession.pending.size
+          });
         } catch (e) {
           activeSession.pumpActive = false;
           trace(`pull: pump threw (cleaning up): ${e.message}`);
@@ -20301,9 +21213,17 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
       rememberPostCompactionRebase(sessionKey);
     if (restored?.toolCatalog.length)
       restoreTurnToolCatalog(sessionKey, restored.toolCatalog);
+    if (restored?.hostAgent || restored?.systemPromptHash) {
+      rememberPromptIdentity(sessionKey, {
+        ...restored.hostAgent ? { hostAgent: restored.hostAgent } : {},
+        ...restored.systemPromptHash ? { systemPromptHash: restored.systemPromptHash } : {}
+      });
+    }
   }
   const providerOptions = callOptions.providerOptions?.cursor;
-  const isCompaction = providerOptions?.[CURSOR_COMPACTION_OPTION] === true || isCompactionSession(sessionKey);
+  const hostAgent = typeof providerOptions?.[CURSOR_HOST_AGENT_OPTION] === "string" ? String(providerOptions[CURSOR_HOST_AGENT_OPTION]).trim() || void 0 : void 0;
+  const compactionOption = providerOptions?.[CURSOR_COMPACTION_OPTION];
+  const isCompaction = compactionOption === true || compactionOption === void 0 && isCompactionSession(sessionKey);
   const toolState = await resolveTurnToolState({
     sessionKey,
     incomingTools,
@@ -20322,11 +21242,20 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   }
   const allowTools = toolState.allowTools;
   const discoveredSubagentCatalog = extractHostSubagentCatalog(cursorTools);
-  const resetState = resolveTurnConversationReset({ sessionKey, isCompaction });
   let recovery = startOptions?.recovery;
   let resumeRecovery = recovery?.kind === "resume" ? recovery : void 0;
   let resuming = !!resumeRecovery;
   const lifecycle = !allowTools && !isCompaction && !recovery;
+  const workspaceRoot = path21.resolve(getSessionDirectory(sessionKey) ?? (options.workspaceRoot || process.cwd()));
+  const baseSystemPrompt = extractSystemPrompt(prompt);
+  const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot);
+  const stableSystemPrompt = [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n");
+  const stableSystemPromptHash = stableSystemPrompt ? createHash6("sha256").update(stableSystemPrompt).digest("hex") : void 0;
+  const resetState = resolveTurnConversationReset({
+    sessionKey,
+    isCompaction,
+    ...lifecycle ? {} : { promptIdentity: { hostAgent, systemPromptHash: stableSystemPromptHash } }
+  });
   let bound = resuming ? { conversationId: resumeRecovery.conversationId, reset: false, previousId: void 0 } : bindConversationId(sessionKey, {
     reset: resetState.reset || recovery?.kind === "rebase",
     ephemeral: lifecycle
@@ -20361,12 +21290,14 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     trace(`conversation reset: reason=${forcedResetReason ?? (recovery?.kind === "rebase" ? "interrupted-run" : resetState.reason ?? "unknown")} sessionKey=${sessionKey ?? "(none)"} previousId=${bound.previousId ?? "-"} \u2192 conversationId=${conversationId}`);
   }
   const lastUser = [...prompt].reverse().find((message) => message.role === "user");
-  const userText = recovery?.kind === "rebase" ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work." : extractUserText(lastUser) || ".";
-  const workspaceRoot = path21.resolve(getSessionDirectory(sessionKey) ?? (options.workspaceRoot || process.cwd()));
-  const baseSystemPrompt = extractSystemPrompt(prompt);
-  const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot);
+  let userText = recovery?.kind === "rebase" ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work." : extractUserText(lastUser) || ".";
   const startedWithCheckpoint = !!conversationState;
-  const modeReminder = isCompaction || startedWithCheckpoint || lifecycle ? void 0 : takeActiveCursorModeReminder(sessionKey, {
+  if (startedWithCheckpoint) {
+    userText = groundCheckpointTurnText(userText, true, workspaceRoot, cursorTools);
+  }
+  const activeMode = getActiveCursorMode(sessionKey);
+  const nativePlanPromptOwnsMode = hostAgent === "plan" && (activeMode === "plan" || activeMode === "spec");
+  const modeReminder = isCompaction || startedWithCheckpoint || lifecycle || nativePlanPromptOwnsMode ? void 0 : takeActiveCursorModeReminder(sessionKey, {
     advertisedTools: cursorTools.map((tool) => tool.name)
   });
   const kickoffWarning = isCompaction || startedWithCheckpoint || lifecycle ? void 0 : takePlanExecutionKickoffWarning(sessionKey);
@@ -20487,6 +21418,8 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     stream.destroy();
     throw error;
   }
+  const hostToolDialect = hostToolDialectFromTools(tools);
+  trace(`host tool dialect: filePathKey=${hostToolDialect.filePathKey} shellTool=${hostToolDialect.shellTool} tools=[${tools.map((t) => t.name).join(",")}]`);
   const session = {
     sessionId: crypto.randomUUID(),
     conversationId,
@@ -20513,6 +21446,8 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
       execRequests: 0
     },
     openCodeSessionId: lifecycle ? void 0 : sessionKey,
+    hostAgent,
+    stableSystemPromptHash,
     postCompactionRebase: isCompaction,
     toolCatalog: snapshotToolCatalog(sessionKey),
     stream,
@@ -20520,10 +21455,15 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     pending: /* @__PURE__ */ new Map(),
     displayToolCalls: /* @__PURE__ */ new Map(),
     editToolCalls: /* @__PURE__ */ new Map(),
+    // Seed from the per-OpenCode-session copy: merges in this turn (and after
+    // checkpoint resumes/rebases, which rebuild the session here) expand
+    // against the last observed host list, not an empty one.
+    mirroredTodos: snapshotMirroredTodosBySession(lifecycle ? void 0 : sessionKey),
     nextBridgedExecId: 9e5,
     blobs: /* @__PURE__ */ new Map(),
     toolDescriptors,
     toolAliases: webToolAliases.aliases,
+    hostToolDialect,
     subagentCatalog,
     requestContext,
     allowTools,
@@ -20613,8 +21553,8 @@ function findContinuationSession(toolResults) {
   }
   return void 0;
 }
-function buildAskQuestionContinuationFrame(pending3, result) {
-  const metadata = pending3.resultMetadata ?? {};
+function buildAskQuestionContinuationFrame(pending4, result) {
+  const metadata = pending4.resultMetadata ?? {};
   const args = metadata.askQuestionArgs;
   if (!args)
     throw new CursorProtocolError("Bridged AskQuestion lost its decoded arguments");
@@ -20633,8 +21573,8 @@ function buildAskQuestionContinuationFrame(pending3, result) {
   const toolCallId = metadata.askQuestionToolCallId;
   return buildAsyncAskQuestionCompletion(typeof toolCallId === "string" ? toolCallId : "", rawArgs, answer);
 }
-function buildCreatePlanContinuationFrame(pending3, result, sessionKey, cursorSessionID) {
-  const metadata = pending3.resultMetadata ?? {};
+function buildCreatePlanContinuationFrame(pending4, result, sessionKey, cursorSessionID) {
+  const metadata = pending4.resultMetadata ?? {};
   const interactionId = metadata.interactionId;
   if (typeof interactionId !== "number") {
     throw new CursorProtocolError("Bridged CreatePlan lost its interaction id");
@@ -20677,23 +21617,18 @@ function buildCreatePlanContinuationFrame(pending3, result, sessionKey, cursorSe
     plan_uri: planUri
   });
 }
-function buildSwitchModeContinuationFrame(pending3, result, sessionKey) {
-  const metadata = pending3.resultMetadata ?? {};
+function buildSwitchModeContinuationFrame(pending4, result) {
+  const metadata = pending4.resultMetadata ?? {};
   const interactionId = metadata.interactionId;
   if (typeof interactionId !== "number") {
     throw new CursorProtocolError("Bridged SwitchMode lost its interaction id");
   }
   const answer = metadata.switchModeBridgeKind === "question" ? switchModeResultFromQuestionOutput(result.output, result.error !== void 0) : switchModeResultFromToolOutput(result.output, result.error !== void 0);
-  if ("approved" in answer) {
-    const target = metadata.switchModeTarget;
-    if (typeof target === "string" && target.trim()) {
-      const normalized = target.trim().toLowerCase();
-      setActiveCursorMode(sessionKey, target, {
-        bridgedPlanEntered: normalized === "plan" || normalized === "spec"
-      });
-    }
-  }
-  return buildSwitchModeInteractionReply(interactionId, answer);
+  const target = "approved" in answer && typeof metadata.switchModeTarget === "string" ? metadata.switchModeTarget.trim() : "";
+  return {
+    frame: buildSwitchModeInteractionReply(interactionId, answer),
+    ...target ? { approvedTarget: target, bridgeKind: metadata.switchModeBridgeKind } : {}
+  };
 }
 function deliverContinuationResults(session, trailingToolResults) {
   const pendingResults = trailingToolResults.filter((r) => r.sessionId === session.sessionId && session.pending.has(r.execId));
@@ -20711,39 +21646,47 @@ function deliverContinuationResults(session, trailingToolResults) {
       trace(`continuation: unavailable execId=${r.execId} reason=${claim.reason}`);
       return void 0;
     }
-    const pending3 = claim.pending;
+    const pending4 = claim.pending;
     let frames = [];
-    if (pending3.resultField === ASK_QUESTION_RESULT_FIELD) {
+    let deliveredSwitchMode;
+    if (pending4.resultField === ASK_QUESTION_RESULT_FIELD) {
       try {
-        frames = [buildAskQuestionContinuationFrame(pending3, r)];
+        frames = [buildAskQuestionContinuationFrame(pending4, r)];
       } catch (error) {
         trace(`continuation: ask_question encode FAILED execId=${r.execId} err=${error.message}`);
         sessionManager.close(session, "result-write-failed");
         return void 0;
       }
-    } else if (pending3.resultField === SWITCH_MODE_RESULT_FIELD) {
+    } else if (pending4.resultField === SWITCH_MODE_RESULT_FIELD) {
       try {
-        frames = [buildSwitchModeContinuationFrame(pending3, r, session.openCodeSessionId)];
+        const built = buildSwitchModeContinuationFrame(pending4, r);
+        frames = [built.frame];
+        if (built.approvedTarget) {
+          deliveredSwitchMode = {
+            target: built.approvedTarget,
+            bridgeKind: built.bridgeKind
+          };
+        }
       } catch (error) {
         trace(`continuation: switch_mode encode FAILED execId=${r.execId} err=${error.message}`);
         sessionManager.close(session, "result-write-failed");
         return void 0;
       }
-    } else if (pending3.resultField === CREATE_PLAN_RESULT_FIELD) {
+    } else if (pending4.resultField === CREATE_PLAN_RESULT_FIELD) {
       try {
-        frames = [buildCreatePlanContinuationFrame(pending3, r, session.openCodeSessionId, session.sessionId)];
+        frames = [buildCreatePlanContinuationFrame(pending4, r, session.openCodeSessionId, session.sessionId)];
       } catch (error) {
         trace(`continuation: create_plan encode FAILED execId=${r.execId} err=${error.message}`);
         sessionManager.close(session, "result-write-failed");
         return void 0;
       }
-    } else if (!pending3.bridged) {
+    } else if (!pending4.bridged) {
       try {
-        const shellResult = pending3.resultField === "shell_stream" || pending3.resultField === "shell_result" || pending3.resultField === "background_shell_spawn_result" ? consumeCursorShellResult(r.toolCallId, r.output) : void 0;
+        const shellResult = pending4.resultField === "shell_stream" || pending4.resultField === "shell_result" || pending4.resultField === "background_shell_spawn_result" ? consumeCursorShellResult(r.toolCallId, r.output) : void 0;
         const workspaceRoot = workspaceRootFromRequestContext(session.requestContext);
-        const correlatedEditCallId = pending3.resultMetadata?.correlatedEditCallId;
-        const requestedPath = pending3.resultMetadata?.path;
-        const correlatedEdit = !r.error && pending3.resultField === "read_result" && pending3.toolName === "read" && typeof correlatedEditCallId === "string" && typeof requestedPath === "string" ? session.editToolCalls?.get(correlatedEditCallId) : void 0;
+        const correlatedEditCallId = pending4.resultMetadata?.correlatedEditCallId;
+        const requestedPath = pending4.resultMetadata?.path;
+        const correlatedEdit = !r.error && pending4.resultField === "read_result" && pending4.toolName === "read" && typeof correlatedEditCallId === "string" && typeof requestedPath === "string" ? session.editToolCalls?.get(correlatedEditCallId) : void 0;
         if (correlatedEdit) {
           const absolutePath = path21.resolve(workspaceRoot, requestedPath);
           if (absolutePath === path21.resolve(workspaceRoot, correlatedEdit.path)) {
@@ -20754,8 +21697,8 @@ function deliverContinuationResults(session, trailingToolResults) {
             }
           }
         }
-        if (pending3.toolName === CURSOR_IMAGE_SAVE_TOOL && pending3.resultField === "write_result" && r.error?.includes(IMAGE_PERMISSION_DENIED_PREFIX)) {
-          const deniedPath = typeof pending3.resultMetadata?.path === "string" ? pending3.resultMetadata.path : "";
+        if (pending4.toolName === CURSOR_IMAGE_SAVE_TOOL && pending4.resultField === "write_result" && r.error?.includes(IMAGE_PERMISSION_DENIED_PREFIX)) {
+          const deniedPath = typeof pending4.resultMetadata?.path === "string" ? pending4.resultMetadata.path : "";
           frames = [encodeMessage("AgentClientMessage", {
             exec_client_message: {
               id: r.execId,
@@ -20771,15 +21714,15 @@ function deliverContinuationResults(session, trailingToolResults) {
             }
           })];
         }
-        if (frames.length === 0 && !r.error && pending3.toolName === CURSOR_IMAGE_SAVE_TOOL && pending3.resultField === "write_result") {
+        if (frames.length === 0 && !r.error && pending4.toolName === CURSOR_IMAGE_SAVE_TOOL && pending4.resultField === "write_result") {
           frames = [encodeMessage("AgentClientMessage", {
             exec_client_message: {
               id: r.execId,
               write_result: {
                 success: {
-                  path: typeof pending3.resultMetadata?.path === "string" ? pending3.resultMetadata.path : "",
+                  path: typeof pending4.resultMetadata?.path === "string" ? pending4.resultMetadata.path : "",
                   lines_created: 0,
-                  file_size: typeof pending3.resultMetadata?.imageByteLength === "number" ? pending3.resultMetadata.imageByteLength : 0
+                  file_size: typeof pending4.resultMetadata?.imageByteLength === "number" ? pending4.resultMetadata.imageByteLength : 0
                 }
               }
             }
@@ -20788,11 +21731,11 @@ function deliverContinuationResults(session, trailingToolResults) {
         if (frames.length === 0) {
           frames = buildExecClientMessages({
             execId: r.execId,
-            resultField: pending3.resultField,
+            resultField: pending4.resultField,
             output: shellResult?.output ?? r.output,
             error: r.error,
-            toolName: pending3.toolName ?? r.toolName,
-            resultMetadata: pending3.resultMetadata,
+            toolName: pending4.toolName ?? r.toolName,
+            resultMetadata: pending4.resultMetadata,
             shellOutcome: shellResult?.outcome,
             workspaceRoot
           });
@@ -20810,13 +21753,33 @@ function deliverContinuationResults(session, trailingToolResults) {
         continue;
       return void 0;
     }
+    if (deliveredSwitchMode) {
+      const normalized = deliveredSwitchMode.target.toLowerCase();
+      setActiveCursorMode(session.openCodeSessionId, deliveredSwitchMode.target, {
+        bridgedPlanEntered: normalized === "plan" || normalized === "spec"
+      });
+      if (deliveredSwitchMode.bridgeKind === "question" && session.openCodeSessionId) {
+        queueHostAgentModeSwitch({
+          sessionID: session.openCodeSessionId,
+          targetModeID: deliveredSwitchMode.target,
+          cursorSessionID: session.sessionId
+        });
+      }
+    }
+    if (pending4.toolName === "todoread" && r.error === void 0) {
+      const snapshot = snapshotMirroredTodosFromReadOutput(r.output);
+      if (snapshot !== void 0) {
+        storeMirroredTodos(session, snapshot);
+        trace(`continuation: mirrored todoread snapshot items=${snapshot.length}`);
+      }
+    }
     session.usageEstimate.inputTokens += estimateTokens(r.output.length);
-    if (pending3.bridged) {
-      trace(`continuation: completed bridged result execId=${r.execId} toolName=${pending3.toolName ?? r.toolName} outLen=${r.output.length}`);
+    if (pending4.bridged) {
+      trace(`continuation: completed bridged result execId=${r.execId} toolName=${pending4.toolName ?? r.toolName} outLen=${r.output.length}`);
       continue;
     }
-    const resultKind = pending3.resultField === ASK_QUESTION_RESULT_FIELD ? "ask_question answer" : pending3.resultField === SWITCH_MODE_RESULT_FIELD ? "switch_mode answer" : pending3.resultField === CREATE_PLAN_RESULT_FIELD ? "create_plan answer" : "exec result";
-    trace(`continuation: wrote ${resultKind} execId=${r.execId} field=${pending3.resultField} frames=${outcome.framesWritten} outLen=${r.output.length}`);
+    const resultKind = pending4.resultField === ASK_QUESTION_RESULT_FIELD ? "ask_question answer" : pending4.resultField === SWITCH_MODE_RESULT_FIELD ? "switch_mode answer" : pending4.resultField === CREATE_PLAN_RESULT_FIELD ? "create_plan answer" : "exec result";
+    trace(`continuation: wrote ${resultKind} execId=${r.execId} field=${pending4.resultField} frames=${outcome.framesWritten} outLen=${r.output.length}`);
   }
   return session;
 }
@@ -20858,9 +21821,9 @@ function isTruthyEnv(value) {
   return value === "1" || value === "true";
 }
 async function waitForStreamWrites(stream) {
-  const pending3 = streamWriteChains.get(stream);
-  if (pending3)
-    await pending3.catch(() => void 0);
+  const pending4 = streamWriteChains.get(stream);
+  if (pending4)
+    await pending4.catch(() => void 0);
 }
 async function writeWithBackpressure(stream, message, operation) {
   const previous = streamWriteChains.get(stream);
@@ -21030,7 +21993,7 @@ async function pump(session, controller, ids, abortSignal) {
     const display = parseDisplayToolCall(displayCallId, stored);
     if (display?.variant !== "edit_tool_call" || display.bridgeable === false)
       return false;
-    const requestedPath = typeof parsed.args.filePath === "string" ? parsed.args.filePath : "";
+    const requestedPath = opencodePathArg(parsed.args) ?? "";
     const editPath = typeof display.args.path === "string" ? display.args.path : "";
     if (!requestedPath || !editPath)
       return false;
@@ -21102,7 +22065,7 @@ async function pump(session, controller, ids, abortSignal) {
   const rejectMissingReadTarget = (parsed) => {
     if (parsed.toolName !== "read")
       return false;
-    const requested = typeof parsed.args.filePath === "string" ? parsed.args.filePath : "";
+    const requested = opencodePathArg(parsed.args) ?? "";
     if (!requested)
       return false;
     if (isUriReadTarget(requested)) {
@@ -21324,7 +22287,9 @@ async function pump(session, controller, ids, abortSignal) {
             conversationId: session.conversationId,
             requestContext: session.requestContext,
             toolCatalog: session.toolCatalog ?? [],
-            postCompactionRebase: session.postCompactionRebase
+            postCompactionRebase: session.postCompactionRebase,
+            hostAgent: session.hostAgent,
+            systemPromptHash: session.stableSystemPromptHash
           }).catch((error) => {
             trace(`conversation persistence: TurnEnded save failed sessionKey=${session.openCodeSessionId}: ${String(error)}`);
           });
@@ -21391,7 +22356,7 @@ async function pump(session, controller, ids, abortSignal) {
           if (!session.allowTools) {
             trace(`display tool_call_completed: SKIPPED (allowTools=false) callId=${callId}`);
           } else {
-            const display = parseDisplayToolCall(callId, toolCall);
+            const display = parseDisplayToolCall(callId, toolCall, session.mirroredTodos);
             const advertised = advertisedToolNamesFromDescriptors(session.toolDescriptors);
             const bridged = display ? resolveBridgedOpenCodeToolCall(display, advertised) : void 0;
             if (!display) {
@@ -21402,6 +22367,11 @@ async function pump(session, controller, ids, abortSignal) {
             } else if (!bridged) {
               trace(`display tool_call_completed: no advertised OpenCode tool callId=${callId} variant=${display.variant} preferred=${display.preferredToolName} advertised=[${advertised.join(",")}]`);
             } else {
+              if (bridged.toolName === "todowrite" && bridged.variant === "update_todos_tool_call") {
+                const snapshot = snapshotMirroredTodos(bridged.args.todos);
+                if (snapshot !== void 0)
+                  storeMirroredTodos(session, snapshot);
+              }
               const execId = session.nextBridgedExecId++;
               sessionManager.registerPending(execId, session, "bridged", bridged.toolName, true);
               const toolCallId = `cursor_${session.sessionId}_${execId}`;
@@ -21494,7 +22464,7 @@ async function pump(session, controller, ids, abortSignal) {
         } else {
           replaySafety.markBarrier("non-control-exec");
           const displayCallId = extractExecDisplayCallId(esm);
-          const parsed = parseExecServerMessage(esm);
+          const parsed = parseExecServerMessage(esm, session.hostToolDialect);
           if (parsed) {
             const executableToolName = resolveCustomWebToolAlias(parsed.toolName, session.toolAliases);
             if (executableToolName !== parsed.toolName) {
@@ -21502,6 +22472,17 @@ async function pump(session, controller, ids, abortSignal) {
               parsed.toolName = executableToolName;
             }
             remapNativeSubagentForCatalog(parsed, advertisedToolNameSet, session.subagentCatalog);
+            if (displayCallId && (parsed.toolName === "task" || parsed.toolName === "subagent")) {
+              const stored = session.displayToolCalls.get(displayCallId);
+              const display = parseDisplayToolCall(displayCallId, stored);
+              if (display?.variant === "task_tool_call") {
+                const description = typeof display.args.description === "string" ? display.args.description : void 0;
+                preferCorrelatedTaskDescription(parsed, description);
+                if (description?.trim()) {
+                  trace(`exec: preferred TaskToolCall description callId=${displayCallId} description=${JSON.stringify(description.trim())}`);
+                }
+              }
+            }
             const editCall = displayCallId ? session.editToolCalls?.get(displayCallId) : void 0;
             if (!editCall?.completeRead)
               rejectPartialReadMutation(parsed);
@@ -21602,6 +22583,13 @@ async function pump(session, controller, ids, abortSignal) {
               registerCursorShellCall(tc.toolCallId, parsed.resultMetadata);
             }
             sessionManager.registerPending(parsed.id, session, parsed.resultField, parsed.toolName, false, parsed.resultMetadata);
+            if (parsed.toolName === "todowrite") {
+              const snapshot = snapshotMirroredTodos(parsed.args.todos);
+              if (snapshot !== void 0) {
+                storeMirroredTodos(session, snapshot);
+                trace(`exec: mirrored todowrite snapshot items=${snapshot.length}`);
+              }
+            }
             trace(`exec: EMITTED tool-call toolCallId=${tc.toolCallId} toolName=${tc.toolName} inputLen=${tc.input.length}`);
             emittedHostTools++;
             closeOpenSpans();
@@ -21697,7 +22685,12 @@ async function pump(session, controller, ids, abortSignal) {
           setActiveCursorMode(session.openCodeSessionId, sw.args.targetModeId, {
             bridgedPlanEntered: false
           });
-          trace(`interaction_query: APPROVED switch_mode id=${handled.id} target=${JSON.stringify(sw.args.targetModeId)} (no host plan tool; provider-owned mode) cursorToolCallId=${sw.toolCallId || "(none)"}`);
+          const hostAgentSwitchQueued = session.openCodeSessionId ? queueHostAgentModeSwitch({
+            sessionID: session.openCodeSessionId,
+            targetModeID: sw.args.targetModeId,
+            cursorSessionID: session.sessionId
+          }) : false;
+          trace(`interaction_query: APPROVED switch_mode id=${handled.id} target=${JSON.stringify(sw.args.targetModeId)} (no host plan tool; ${hostAgentSwitchQueued ? "native host-agent switch queued" : "provider-owned fallback"}) cursorToolCallId=${sw.toolCallId || "(none)"}`);
           continue;
         }
         if (handled.outcome === "bridged" && handled.switchMode) {
@@ -21862,6 +22855,13 @@ function extractSystemPrompt(prompt) {
   }
   return parts.length > 0 ? parts.join("\n\n") : void 0;
 }
+function groundCheckpointTurnText(userText, checkpoint, workspaceRoot, tools) {
+  if (!checkpoint)
+    return userText;
+  return appendCheckpointUserGrounding(userText, workspaceRoot, {
+    requireAbsolutePathArg: hostToolDialectFromTools(tools).filePathKey === "path"
+  });
+}
 function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   if (isCompaction)
     return void 0;
@@ -21876,11 +22876,15 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   instructions.push("- Cursor-native CreatePlan is accepted as a Cursor interaction (not an OpenCode or MCP catalog tool). Raise it normally; the provider writes the plan under the host's calculated plans directory and handles execution approval. Do not narrate that CreatePlan is missing, unavailable, or not an MCP tool.");
   if (names.has("plan_enter")) {
     instructions.push("- To enter plan mode, call the OpenCode `plan_enter` tool. Cursor-native SwitchMode requests for plan/spec are also accepted and answered through it.");
-  } else if (names.has("todowrite")) {
-    instructions.push("- For planning task lists, call the OpenCode `todowrite` tool and/or write the plan as normal markdown.");
   }
   if (names.has("plan_exit")) {
     instructions.push("- To leave plan mode, call the OpenCode `plan_exit` tool. Cursor-native SwitchMode for any non-plan target (agent, build, chat, debug, edit, background, multitask, triage, project, \u2026) is also accepted and answered through it; the provider then injects the Cursor CLI-shaped mode reminder for that target.");
+  }
+  if (names.has("todowrite") || names.has("todoread")) {
+    const write = names.has("todowrite") ? "`todowrite`" : void 0;
+    const read = names.has("todoread") ? "`todoread`" : void 0;
+    const tools2 = write && read ? `${write} / ${read}` : write ?? read;
+    instructions.push(`- For task-list create/update/complete/cancel${read ? "/read" : ""}, call OpenCode ${tools2}; do not use Cursor TodoWrite, and do not narrate Cursor-vs-OpenCode todo-tool differences.`);
   }
   if (names.has(CUSTOM_WEBSEARCH_TOOL)) {
     instructions.push(`- For web searches, call \`${CUSTOM_WEBSEARCH_TOOL}\`; do not use Cursor's native WebSearch interaction.`);
@@ -21894,8 +22898,12 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   if (names.has(CUSTOM_READ_MCP_RESOURCE_TOOL)) {
     instructions.push(`- To read an MCP resource, call \`${CUSTOM_READ_MCP_RESOURCE_TOOL}\`; do not use Cursor's native resource-reading interaction.`);
   }
-  if (names.has("task")) {
-    const target = "`task`";
+  if (names.has("execute")) {
+    const shell = names.has("shell") ? "`shell`" : names.has("bash") ? "`bash`" : void 0;
+    instructions.push(shell ? `- OpenCode \`execute\` is Code Mode JavaScript (\`code\`); it is not a shell. For OS commands, call OpenCode ${shell}. Do not pass \`command\` to \`execute\`.` : "- OpenCode `execute` is Code Mode JavaScript (`code`); it is not a shell. Do not pass `command` to `execute`.");
+  }
+  if (names.has("task") || names.has("subagent")) {
+    const target = names.has("task") ? "`task`" : "`subagent`";
     const available = subagents.agents.map((agent) => `\`${agent.name}\``).join(", ");
     instructions.push(`- Native Cursor Task/subagent requests are executed through OpenCode ${target}. Advertised custom subagent names are used exactly; otherwise \`unspecified\` and \`generalPurpose\` select host \`general\`, \`bugbot\`, \`security-review\`, and \`explore\` select host \`explore\` (then \`general\`), and other specialized Cursor types fall back to \`general\`.` + (available ? ` Spawnable host agents this turn: ${available}.` : ""));
     if (subagents.agents.some((agent) => agent.name === "scout")) {
@@ -21907,13 +22915,16 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   } else if (names.has("apply_patch")) {
     instructions.push("- Use OpenCode `apply_patch` for file-content changes; do not use shell, Python, or heredocs to change file content while it is available. Cursor-native write and edit requests are accepted and converted to `apply_patch` automatically.");
   }
+  if (hostToolDialectFromTools(tools).filePathKey === "path") {
+    instructions.push("- OpenCode file tools take `path` as an absolute path under the workspace root above. Do not pass a project-relative path, and do not invent a different absolute prefix.");
+  }
   if (names.has("edit") || names.has("write") || names.has("apply_patch")) {
     instructions.push("- Never use a read result as complete file content when it says the output is capped, partial, or requires another offset. Read the remaining ranges first, or make a targeted edit/patch from complete context; do not pass a partial read back as a whole-file replacement.");
   }
   return [
     `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name14) => `\`${name14}\``).join(", ")}.`,
     `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
-    subagents.executor ? "Call only tools in that exact list for ordinary host execution. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing." : "Call only tools in that exact list for ordinary host execution. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing. Other unlisted Cursor-native tools are not bridged; complete the work with the listed tools or explain the limitation without claiming a missing MCP tool.",
+    subagents.executor ? "Call only tools in that exact OpenCode list for ordinary host execution. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing." : "Call only tools in that exact OpenCode list for ordinary host execution. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing. Other unlisted Cursor-native tools are not bridged; complete the work with the listed tools or explain the limitation without claiming a missing MCP tool.",
     ...instructions.length > 0 ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"] : [],
     ...instructions,
     "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
@@ -22098,9 +23109,23 @@ function resolveTurnConversationReset(input2) {
       rememberPostCompactionRebase(sessionKey);
     return { reset: true, reason: "compaction" };
   }
+  let promptChange;
+  if (sessionKey && input2.promptIdentity) {
+    const current = normalizePromptIdentity(input2.promptIdentity);
+    const previous = promptIdentityBySession.get(sessionKey);
+    if (previous && promptIdentityChanged(previous, current)) {
+      promptChange = current.hostAgent !== void 0 && previous.hostAgent !== current.hostAgent ? "agent-change" : "system-prompt-change";
+    }
+    rememberPromptIdentity(sessionKey, {
+      ...previous,
+      ...current
+    });
+  }
   if (sessionKey && postCompactionRebaseBySession.delete(sessionKey)) {
     return { reset: true, reason: "post-compaction-rebase" };
   }
+  if (promptChange)
+    return { reset: true, reason: promptChange };
   return { reset: false };
 }
 function extractUserText(lastUser) {
@@ -22161,7 +23186,7 @@ function foldStreamParts(parts) {
     ...providerMetadata ? { providerMetadata } : {}
   };
 }
-var _availableModels, _availableModelsMtimeMs, toolCatalogBySession, sentHistoryImageHashesBySession, postCompactionRebaseBySession, MAX_TURN_STATE_SESSIONS, MAX_SENT_HISTORY_IMAGES_PER_SESSION, DEFAULT_RETRY_POLICY, MAX_RETRY_ATTEMPTS, MAX_RETRY_DELAY_MS, RUN_REQUEST_DECODE_FAILED, RUN_REQUEST_UNSUPPORTED, RUN_REPLY_FAILED, MAX_CHECKPOINT_BLOB_GRAPH_BYTES, RESPONSE_REQUIRED_CHANNEL_BY_FIELD, toolCatalogWaitersBySession, heartbeatWritePendingBySession, heartbeatGenerationBySession, streamWriteChains;
+var _availableModels, _availableModelsMtimeMs, toolCatalogBySession, sentHistoryImageHashesBySession, postCompactionRebaseBySession, promptIdentityBySession, MAX_TURN_STATE_SESSIONS, MAX_SENT_HISTORY_IMAGES_PER_SESSION, DEFAULT_RETRY_POLICY, MAX_RETRY_ATTEMPTS, MAX_RETRY_DELAY_MS, RUN_REQUEST_DECODE_FAILED, RUN_REQUEST_UNSUPPORTED, RUN_REPLY_FAILED, MAX_CHECKPOINT_BLOB_GRAPH_BYTES, RESPONSE_REQUIRED_CHANNEL_BY_FIELD, toolCatalogWaitersBySession, mirroredTodosBySession, heartbeatWritePendingBySession, heartbeatGenerationBySession, streamWriteChains;
 var init_language_model = __esm({
   "node_modules/cursor-opencode-provider/dist/language-model.js"() {
     init_connect();
@@ -22181,6 +23206,7 @@ var init_language_model = __esm({
     init_switch_mode();
     init_create_plan();
     init_plan_execution_kickoff();
+    init_host_agent_mode();
     init_generate_image();
     init_image_staging();
     init_image_save();
@@ -22211,6 +23237,7 @@ var init_language_model = __esm({
     toolCatalogBySession = /* @__PURE__ */ new Map();
     sentHistoryImageHashesBySession = /* @__PURE__ */ new Map();
     postCompactionRebaseBySession = /* @__PURE__ */ new Set();
+    promptIdentityBySession = /* @__PURE__ */ new Map();
     MAX_TURN_STATE_SESSIONS = 256;
     MAX_SENT_HISTORY_IMAGES_PER_SESSION = 256;
     DEFAULT_RETRY_POLICY = {
@@ -22230,6 +23257,7 @@ var init_language_model = __esm({
       [7, "interaction"]
     ]);
     toolCatalogWaitersBySession = /* @__PURE__ */ new Map();
+    mirroredTodosBySession = /* @__PURE__ */ new Map();
     heartbeatWritePendingBySession = /* @__PURE__ */ new WeakMap();
     heartbeatGenerationBySession = /* @__PURE__ */ new WeakMap();
     streamWriteChains = /* @__PURE__ */ new WeakMap();
@@ -22938,6 +23966,7 @@ async function CursorPlugin(input2) {
     async "chat.params"(hookInput, output) {
       if (hookInput.model.providerID !== CURSOR_PROVIDER_ID)
         return;
+      output.options[CURSOR_HOST_AGENT_OPTION] = hookInput.agent;
       if (hookInput.agent === "compaction") {
         output.options[CURSOR_COMPACTION_OPTION] = true;
       }

@@ -2,8 +2,8 @@
 
 ## cursor-opencode-provider
 
-Adopted package: `cursor-opencode-provider` 0.6.7  
-Reviewed source revision: `889ad0bf981c0c325100134d86be87f426bc940f`
+Adopted package: `cursor-opencode-provider` 0.7.2
+Reviewed source revision: `823dcafabb39aea236a3a8d9b198da93f3f74d5f`
 
 MIT License
 
