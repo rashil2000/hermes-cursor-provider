@@ -48,7 +48,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // node_modules/cursor-opencode-provider/dist/shared.js
-var CURSOR_API_HOST, CURSOR_WEBSITE_HOST, FALLBACK_CLIENT_VERSION, CURSOR_PROVIDER_ID, CURSOR_COMPACTION_OPTION, CURSOR_HOST_AGENT_OPTION, SERVER_CONFIG_PATH, MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS, CONVERSATION_CACHE_DIR, CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS, VERSION_CACHE_FILE, CONNECT_PROTOCOL_VERSION;
+var CURSOR_API_HOST, CURSOR_WEBSITE_HOST, FALLBACK_CLIENT_VERSION, CURSOR_PROVIDER_ID, CURSOR_COMPACTION_OPTION, CURSOR_HISTORY_REWRITE_OPTION, CURSOR_HOST_AGENT_OPTION, SERVER_CONFIG_PATH, MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS, CONVERSATION_CACHE_DIR, CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS, VERSION_CACHE_FILE, CONNECT_PROTOCOL_VERSION;
 var init_shared = __esm({
   "node_modules/cursor-opencode-provider/dist/shared.js"() {
     CURSOR_API_HOST = "api2.cursor.sh";
@@ -56,6 +56,7 @@ var init_shared = __esm({
     FALLBACK_CLIENT_VERSION = "cli-2026.07.09-a3815c0";
     CURSOR_PROVIDER_ID = "cursor";
     CURSOR_COMPACTION_OPTION = "opencodeCompaction";
+    CURSOR_HISTORY_REWRITE_OPTION = "opencodeHistoryRewrite";
     CURSOR_HOST_AGENT_OPTION = "opencodeHostAgent";
     SERVER_CONFIG_PATH = "/aiserver.v1.ServerConfigService/GetServerConfig";
     MODEL_CACHE_FILE = "cursor-models.json";
@@ -258,7 +259,9 @@ function ensureSecureDebugLog(filePath, options = {}) {
     }
     fs2.chmodSync(dir, 448);
   }
-  fs2.writeFileSync(filePath, "", { mode: 384 });
+  if (!fs2.existsSync(filePath)) {
+    fs2.writeFileSync(filePath, "", { mode: 384 });
+  }
   fs2.chmodSync(filePath, 384);
 }
 function announceLogPath(filePath) {
@@ -270,6 +273,21 @@ function announceLogPath(filePath) {
   } catch {
   }
 }
+function debugBannerLine() {
+  return `--- cursor-provider debug (pid ${process.pid}) ${(/* @__PURE__ */ new Date()).toISOString()} ---
+`;
+}
+function truncateDebugLogIfOversized(filePath, maxBytes = DEBUG_LOG_MAX_BYTES) {
+  if (!fs2.existsSync(filePath))
+    return false;
+  const size = fs2.statSync(filePath).size;
+  if (size < maxBytes)
+    return false;
+  fs2.writeFileSync(filePath, debugBannerLine() + `[${(/* @__PURE__ */ new Date()).toISOString()}] debug: size-cap truncate file=${filePath} wasBytes=${size} maxBytes=${maxBytes}
+`, { mode: 384 });
+  fs2.chmodSync(filePath, 384);
+  return true;
+}
 function trace(msg) {
   if (!DEBUG_ENABLED)
     return;
@@ -280,13 +298,20 @@ function trace(msg) {
     }
     if (!_traceInitialized) {
       ensureSecureDebugLog(_debugFile, { secureParent: _debugFileUsesManagedDirectory });
-      fs2.writeFileSync(_debugFile, `--- cursor-provider debug (pid ${process.pid}) ${(/* @__PURE__ */ new Date()).toISOString()} ---
-`, { mode: 384 });
+      truncateDebugLogIfOversized(_debugFile);
+      const banner = debugBannerLine();
+      const preexisting = fs2.existsSync(_debugFile) && fs2.statSync(_debugFile).size > 0;
+      if (preexisting) {
+        fs2.appendFileSync(_debugFile, banner);
+      } else {
+        fs2.writeFileSync(_debugFile, banner, { mode: 384 });
+      }
       _traceInitialized = true;
       announceLogPath(_debugFile);
-      fs2.appendFileSync(_debugFile, `[${(/* @__PURE__ */ new Date()).toISOString()}] debug: enabled file=${_debugFile} xdg_cache_home=${process.env.XDG_CACHE_HOME ?? "(unset)"} cwd=${process.cwd()}
+      fs2.appendFileSync(_debugFile, `[${(/* @__PURE__ */ new Date()).toISOString()}] debug: enabled file=${_debugFile} xdg_cache_home=${process.env.XDG_CACHE_HOME ?? "(unset)"} cwd=${process.cwd()}` + (preexisting ? " reinit=append" : "") + `
 `);
     }
+    truncateDebugLogIfOversized(_debugFile);
     fs2.appendFileSync(_debugFile, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
 `);
   } catch {
@@ -299,10 +324,11 @@ function traceRequestContextPaths(label, requestContext) {
   const mcp = requestContext?.mcp_file_system_options && typeof requestContext.mcp_file_system_options === "object" ? requestContext.mcp_file_system_options : void 0;
   trace(`${label}: workspace_paths=${JSON.stringify(env?.workspace_paths ?? null)} process_working_directory=${JSON.stringify(env?.process_working_directory ?? null)} project_folder=${JSON.stringify(env?.project_folder ?? null)} terminals_folder=${JSON.stringify(env?.terminals_folder ?? null)} agent_transcripts_folder=${JSON.stringify(env?.agent_transcripts_folder ?? null)} workspace_project_dir=${JSON.stringify(mcp?.workspace_project_dir ?? null)}`);
 }
-var DEBUG_ENABLED, _traceInitialized, _debugFile, _debugFileUsesManagedDirectory, _announcedLogPath;
+var DEBUG_ENABLED, DEBUG_LOG_MAX_BYTES, _traceInitialized, _debugFile, _debugFileUsesManagedDirectory, _announcedLogPath;
 var init_debug = __esm({
   "node_modules/cursor-opencode-provider/dist/debug.js"() {
     DEBUG_ENABLED = process.env.CURSOR_PROVIDER_DEBUG === "1" || process.env.CURSOR_PROVIDER_DEBUG === "true";
+    DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
     _traceInitialized = false;
     _debugFileUsesManagedDirectory = false;
     _announcedLogPath = false;
@@ -763,6 +789,323 @@ var init_errors = __esm({
   }
 });
 
+// node_modules/cursor-opencode-provider/dist/transport/https-proxy.js
+import net from "node:net";
+import tls from "node:tls";
+function resolveHttpsProxyUrl(targetHost, env = process.env, targetPort = 443) {
+  if (!targetHost)
+    return void 0;
+  if (hostMatchesNoProxy(targetHost, env.NO_PROXY ?? env.no_proxy, targetPort))
+    return void 0;
+  const raw = (env.HTTPS_PROXY ?? env.https_proxy)?.trim();
+  if (!raw)
+    return void 0;
+  try {
+    const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) ? raw : `http://${raw}`;
+    const url = new URL(withScheme);
+    if (url.protocol !== "http:")
+      return void 0;
+    if (!url.hostname)
+      return void 0;
+    return url;
+  } catch {
+    return void 0;
+  }
+}
+function hostMatchesNoProxy(targetHost, noProxy, targetPort = 443) {
+  if (!noProxy?.trim())
+    return false;
+  const host = targetHost.trim().toLowerCase().replace(/\.$/, "");
+  if (!host)
+    return false;
+  for (const part of noProxy.split(/[\s,]+/)) {
+    const entry = part.trim().toLowerCase();
+    if (!entry)
+      continue;
+    if (entry === "*")
+      return true;
+    const [entryHostRaw, entryPort] = splitHostPort(entry);
+    const entryHost = entryHostRaw.replace(/^\./, "").replace(/\.$/, "");
+    if (!entryHost)
+      continue;
+    if (entryPort !== void 0 && Number(entryPort) !== targetPort)
+      continue;
+    if (host === entryHost)
+      return true;
+    if (host.endsWith(`.${entryHost}`))
+      return true;
+  }
+  return false;
+}
+function splitHostPort(entry) {
+  if (entry.startsWith("[")) {
+    const end = entry.indexOf("]");
+    if (end === -1)
+      return [entry, void 0];
+    const host = entry.slice(1, end);
+    const rest = entry.slice(end + 1);
+    if (rest.startsWith(":") && rest.length > 1)
+      return [host, rest.slice(1)];
+    return [host, void 0];
+  }
+  const idx = entry.lastIndexOf(":");
+  if (idx > 0 && /^\d+$/.test(entry.slice(idx + 1))) {
+    return [entry.slice(0, idx), entry.slice(idx + 1)];
+  }
+  return [entry, void 0];
+}
+function proxyEndpoint(proxy) {
+  return {
+    host: proxy.hostname.replace(/^\[(.*)\]$/, "$1"),
+    port: proxy.port ? Number(proxy.port) : 80
+  };
+}
+function decodeUserinfo(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+function proxyAuthorizationHeader(proxy) {
+  if (!proxy.username && !proxy.password)
+    return void 0;
+  const user = decodeUserinfo(proxy.username);
+  const pass = decodeUserinfo(proxy.password);
+  const token = Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
+  return `Basic ${token}`;
+}
+async function openHttpsConnectTunnel(options) {
+  const targetPort = options.targetPort ?? 443;
+  const proxy = options.proxy;
+  if (proxy.protocol !== "http:") {
+    throw new CursorTransportError(`HTTPS CONNECT proxy must use http:// (got ${proxy.protocol}); https:// proxies are not supported`, { transient: false, replaySafe: true, code: "CURSOR_PROXY_UNSUPPORTED" });
+  }
+  const { host: proxyHost, port: proxyPort } = proxyEndpoint(proxy);
+  const connect = options.connect ?? net.connect;
+  const authority = `${options.targetHost}:${targetPort}`;
+  const auth = proxyAuthorizationHeader(proxy);
+  const request = [
+    `CONNECT ${authority} HTTP/1.1`,
+    `Host: ${authority}`,
+    "Proxy-Connection: keep-alive",
+    ...auth ? [`Proxy-Authorization: ${auth}`] : [],
+    "",
+    ""
+  ].join("\r\n");
+  if (options.signal?.aborted) {
+    throw new CursorTransportError("HTTPS CONNECT tunnel aborted before connect", {
+      transient: true,
+      replaySafe: true,
+      code: "CURSOR_PROXY_ABORTED",
+      cause: options.signal.reason
+    });
+  }
+  const socket = await new Promise((resolve2, reject) => {
+    const s = connect(proxyPort, proxyHost);
+    const onAbort = () => {
+      cleanup();
+      try {
+        s.destroy();
+      } catch {
+      }
+      reject(new CursorTransportError("HTTPS CONNECT tunnel aborted during TCP connect", {
+        transient: true,
+        replaySafe: true,
+        code: "CURSOR_PROXY_ABORTED",
+        cause: options.signal?.reason
+      }));
+    };
+    const cleanup = () => {
+      s.removeListener("connect", onConnect);
+      s.removeListener("error", onError);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(new CursorTransportError(`HTTPS CONNECT proxy TCP connect to ${proxyHost}:${proxyPort} failed`, { transient: true, replaySafe: true, code: "CURSOR_PROXY_CONNECT_FAILED", cause: error }));
+    };
+    const onConnect = () => {
+      cleanup();
+      resolve2(s);
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    s.once("connect", onConnect);
+    s.once("error", onError);
+  });
+  await new Promise((resolve2, reject) => {
+    let settled = false;
+    let buffer = Buffer.alloc(0);
+    const onAbort = () => {
+      fail(new CursorTransportError("HTTPS CONNECT tunnel aborted during handshake", {
+        transient: true,
+        replaySafe: true,
+        code: "CURSOR_PROXY_ABORTED",
+        cause: options.signal?.reason
+      }));
+    };
+    const cleanup = () => {
+      socket.removeListener("data", onData);
+      socket.removeListener("error", onError);
+      socket.removeListener("close", onClose);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const fail = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      try {
+        socket.destroy();
+      } catch {
+      }
+      reject(error);
+    };
+    const onError = (error) => {
+      fail(new CursorTransportError("HTTPS CONNECT tunnel socket error", {
+        transient: true,
+        replaySafe: true,
+        code: "CURSOR_PROXY_CONNECT_FAILED",
+        cause: error
+      }));
+    };
+    const onClose = () => {
+      fail(new CursorTransportError("HTTPS CONNECT tunnel closed before response", {
+        transient: true,
+        replaySafe: true,
+        code: "CURSOR_PROXY_CONNECT_FAILED"
+      }));
+    };
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) {
+        if (buffer.length > 64e3) {
+          fail(new CursorTransportError("HTTPS CONNECT response headers too large", {
+            transient: true,
+            replaySafe: true,
+            code: "CURSOR_PROXY_CONNECT_FAILED"
+          }));
+        }
+        return;
+      }
+      const headerText = buffer.subarray(0, headerEnd).toString("utf8");
+      const statusLine = headerText.split("\r\n", 1)[0] ?? "";
+      const match = /^HTTP\/\d\.\d\s+(\d{3})\b/i.exec(statusLine);
+      const status = match ? Number(match[1]) : NaN;
+      if (!(status >= 200 && status < 300)) {
+        const transient = Number.isNaN(status) || status === 429 || status >= 500;
+        fail(new CursorTransportError(`HTTPS CONNECT to ${authority} via ${proxyHost}:${proxyPort} failed: ${statusLine || "no status"}`, { transient, replaySafe: true, code: "CURSOR_PROXY_CONNECT_REJECTED" }));
+        return;
+      }
+      const rest = buffer.subarray(headerEnd + 4);
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      if (rest.length > 0)
+        socket.unshift(rest);
+      resolve2();
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    socket.on("data", onData);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+    try {
+      socket.write(request);
+    } catch (error) {
+      fail(new CursorTransportError("HTTPS CONNECT request write failed", {
+        transient: true,
+        replaySafe: true,
+        code: "CURSOR_PROXY_CONNECT_FAILED",
+        cause: error
+      }));
+    }
+  });
+  return socket;
+}
+async function openProxiedTlsSocket(options) {
+  const targetPort = options.targetPort ?? 443;
+  const plain = await openHttpsConnectTunnel({
+    proxy: options.proxy,
+    targetHost: options.targetHost,
+    targetPort,
+    signal: options.signal,
+    connect: options.connect
+  });
+  const tlsConnect = options.tlsConnect ?? tls.connect;
+  return await new Promise((resolve2, reject) => {
+    const tlsError = (cause) => new CursorTransportError(`HTTPS CONNECT TLS to ${options.targetHost} failed`, { transient: true, replaySafe: true, code: "CURSOR_PROXY_TLS_FAILED", cause });
+    const abortError = () => new CursorTransportError("HTTPS CONNECT TLS handshake aborted", {
+      transient: true,
+      replaySafe: true,
+      code: "CURSOR_PROXY_ABORTED",
+      cause: options.signal?.reason
+    });
+    if (options.signal?.aborted) {
+      try {
+        plain.destroy();
+      } catch {
+      }
+      reject(abortError());
+      return;
+    }
+    let socket;
+    try {
+      socket = tlsConnect({
+        socket: plain,
+        servername: options.targetHost,
+        ALPNProtocols: ["h2"]
+      });
+    } catch (error) {
+      try {
+        plain.destroy();
+      } catch {
+      }
+      reject(tlsError(error));
+      return;
+    }
+    let settled = false;
+    const cleanup = () => {
+      socket.removeListener("secureConnect", onSecure);
+      socket.removeListener("error", onError);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const fail = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      try {
+        socket.destroy();
+      } catch {
+      }
+      try {
+        plain.destroy();
+      } catch {
+      }
+      reject(error);
+    };
+    const onAbort = () => fail(abortError());
+    const onError = (error) => fail(tlsError(error));
+    const onSecure = () => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      resolve2(socket);
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    socket.once("secureConnect", onSecure);
+    socket.once("error", onError);
+  });
+}
+var init_https_proxy = __esm({
+  "node_modules/cursor-opencode-provider/dist/transport/https-proxy.js"() {
+    init_errors();
+  }
+});
+
 // node_modules/cursor-opencode-provider/dist/transport/connect.js
 import http2 from "node:http2";
 function unaryTimeoutMs(operation, value) {
@@ -1084,40 +1427,64 @@ function validateCachedSession(session, pingTimeoutMs) {
 }
 function connectSession(origin) {
   return new Promise((resolve2, reject) => {
-    const session = http2.connect(origin);
     let settled = false;
-    const cleanup = () => {
+    let session;
+    let tunnelSocket;
+    const abort = new AbortController();
+    const clearConnectTimer = () => {
       clearTimeout(timer);
+    };
+    const detachSessionListeners = () => {
+      if (!session)
+        return;
       session.removeListener("error", onError);
       session.removeListener("close", onClose);
       session.removeListener("connect", onConnect);
+    };
+    const destroyTunnel = () => {
+      try {
+        tunnelSocket?.destroy();
+      } catch {
+      }
+      tunnelSocket = void 0;
     };
     const fail = (error) => {
       if (settled)
         return;
       settled = true;
-      cleanup();
-      dropSession(origin, session);
+      clearConnectTimer();
       try {
-        session.destroy();
+        abort.abort(error);
       } catch {
       }
+      detachSessionListeners();
+      if (session) {
+        dropSession(origin, session);
+        try {
+          session.destroy();
+        } catch {
+        }
+      }
+      destroyTunnel();
       reject(error);
     };
     const onError = (error) => fail(toTransportError(error, "Cursor HTTP/2 connection failed"));
     const onClose = () => fail(new CursorTransportError(`HTTP/2 connection to ${origin} closed before connecting`));
     const onConnect = () => {
-      if (settled)
+      if (settled || !session)
         return;
       settled = true;
-      cleanup();
+      clearConnectTimer();
+      detachSessionListeners();
       installSessionInvalidation(origin, session);
       if (session.destroyed || session.closed) {
         const error = new CursorTransportError(`HTTP/2 connection to ${origin} closed while connecting`);
         invalidateSession(origin, session);
+        destroyTunnel();
         reject(error);
         return;
       }
+      tunnelSocket = void 0;
       _http2SessionCreatedAt.set(session, Date.now());
       _http2Sessions.set(origin, session);
       trace(`h2 session connected: origin=${origin}`);
@@ -1127,9 +1494,49 @@ function connectSession(origin) {
       fail(new CursorTransportError(`HTTP/2 connect to ${origin} timed out after ${CONNECT_TIMEOUT_MS}ms`));
     }, CONNECT_TIMEOUT_MS);
     timer.unref?.();
-    session.on("error", onError);
-    session.once("close", onClose);
-    session.once("connect", onConnect);
+    void (async () => {
+      try {
+        const { hostname, port: originPort } = new URL(origin);
+        const targetPort = originPort ? Number(originPort) : 443;
+        const proxy = resolveHttpsProxyUrl(hostname, process.env, targetPort);
+        if (proxy) {
+          const endpoint = proxyEndpoint(proxy);
+          trace(`h2 connect via HTTPS proxy: origin=${origin} proxy=${endpoint.host}:${endpoint.port}`);
+          const tlsSocket = await openProxiedTlsSocket({
+            proxy,
+            targetHost: hostname,
+            targetPort,
+            signal: abort.signal
+          });
+          if (settled) {
+            try {
+              tlsSocket.destroy();
+            } catch {
+            }
+            return;
+          }
+          tunnelSocket = tlsSocket;
+          session = http2.connect(origin, {
+            createConnection: () => tlsSocket
+          });
+        } else {
+          session = http2.connect(origin);
+        }
+        if (settled) {
+          try {
+            session.destroy();
+          } catch {
+          }
+          destroyTunnel();
+          return;
+        }
+        session.on("error", onError);
+        session.once("close", onClose);
+        session.once("connect", onConnect);
+      } catch (error) {
+        fail(toTransportError(error, "Cursor HTTP/2 connection failed"));
+      }
+    })();
   });
 }
 function getSession(baseURL, options = {}) {
@@ -1597,6 +2004,7 @@ var init_connect = __esm({
     init_debug();
     init_errors();
     init_deadline();
+    init_https_proxy();
     API_BASE = `https://${CURSOR_API_HOST}`;
     DEFAULT_UNARY_TIMEOUT_MS = 5e3;
     MAX_TIMER_MS = 2147483647;
@@ -4164,15 +4572,15 @@ var require_fetch = __commonJS({
 var require_path = __commonJS({
   "node_modules/@protobufjs/path/index.js"(exports) {
     "use strict";
-    var path25 = exports;
+    var path26 = exports;
     var isAbsolute = (
       /**
        * Tests if the specified path is absolute.
        * @param {string} path Path to test
        * @returns {boolean} `true` if path is absolute
        */
-      path25.isAbsolute = function isAbsolute2(path26) {
-        return /^(?:\/|\w+:)/.test(path26);
+      path26.isAbsolute = function isAbsolute2(path27) {
+        return /^(?:\/|\w+:)/.test(path27);
       }
     );
     var normalize = (
@@ -4181,9 +4589,9 @@ var require_path = __commonJS({
        * @param {string} path Path to normalize
        * @returns {string} Normalized path
        */
-      path25.normalize = function normalize2(path26) {
-        path26 = path26.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
-        var parts = path26.split("/"), absolute = isAbsolute(path26), prefix = "";
+      path26.normalize = function normalize2(path27) {
+        path27 = path27.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+        var parts = path27.split("/"), absolute = isAbsolute(path27), prefix = "";
         if (absolute)
           prefix = parts.shift() + "/";
         for (var i = 0; i < parts.length; ) {
@@ -4202,7 +4610,7 @@ var require_path = __commonJS({
         return prefix + parts.join("/");
       }
     );
-    path25.resolve = function resolve2(originPath, includePath, alreadyNormalized) {
+    path26.resolve = function resolve2(originPath, includePath, alreadyNormalized) {
       if (!alreadyNormalized)
         includePath = normalize(includePath);
       if (isAbsolute(includePath))
@@ -4386,18 +4794,18 @@ var require_namespace = __commonJS({
       object.onRemove(this);
       return clearCache(this);
     };
-    Namespace.prototype.define = function define2(path25, json) {
-      if (util.isString(path25))
-        path25 = path25.split(".");
-      else if (!Array.isArray(path25))
+    Namespace.prototype.define = function define2(path26, json) {
+      if (util.isString(path26))
+        path26 = path26.split(".");
+      else if (!Array.isArray(path26))
         throw TypeError("illegal path");
-      if (path25 && path25.length && path25[0] === "")
+      if (path26 && path26.length && path26[0] === "")
         throw Error("path must be relative");
-      if (path25.length > util.recursionLimit)
+      if (path26.length > util.recursionLimit)
         throw Error("max depth exceeded");
       var ptr = this;
-      while (path25.length > 0) {
-        var part = path25.shift();
+      while (path26.length > 0) {
+        var part = path26.shift();
         if (ptr.nested && ptr.nested[part]) {
           ptr = ptr.nested[part];
           if (!(ptr instanceof Namespace))
@@ -4432,26 +4840,26 @@ var require_namespace = __commonJS({
       });
       return this;
     };
-    Namespace.prototype.lookup = function lookup(path25, filterTypes, parentAlreadyChecked) {
+    Namespace.prototype.lookup = function lookup(path26, filterTypes, parentAlreadyChecked) {
       if (typeof filterTypes === "boolean") {
         parentAlreadyChecked = filterTypes;
         filterTypes = void 0;
       } else if (filterTypes && !Array.isArray(filterTypes))
         filterTypes = [filterTypes];
-      if (util.isString(path25) && path25.length) {
-        if (path25 === ".")
+      if (util.isString(path26) && path26.length) {
+        if (path26 === ".")
           return this.root;
-        path25 = path25.split(".");
-      } else if (!path25.length)
+        path26 = path26.split(".");
+      } else if (!path26.length)
         return this;
-      var flatPath = path25.join(".");
-      if (path25[0] === "")
-        return this.root.lookup(path25.slice(1), filterTypes);
+      var flatPath = path26.join(".");
+      if (path26[0] === "")
+        return this.root.lookup(path26.slice(1), filterTypes);
       var found = this.root._fullyQualifiedObjects && this.root._fullyQualifiedObjects["." + flatPath];
       if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
         return found;
       }
-      found = this._lookupImpl(path25, flatPath);
+      found = this._lookupImpl(path26, flatPath);
       if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
         return found;
       }
@@ -4459,7 +4867,7 @@ var require_namespace = __commonJS({
         return null;
       var current = this;
       while (current.parent) {
-        found = current.parent._lookupImpl(path25, flatPath);
+        found = current.parent._lookupImpl(path26, flatPath);
         if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
           return found;
         }
@@ -4467,22 +4875,22 @@ var require_namespace = __commonJS({
       }
       return null;
     };
-    Namespace.prototype._lookupImpl = function lookup(path25, flatPath) {
+    Namespace.prototype._lookupImpl = function lookup(path26, flatPath) {
       if (Object.prototype.hasOwnProperty.call(this._lookupCache, flatPath)) {
         return this._lookupCache[flatPath];
       }
-      var found = this.get(path25[0]);
+      var found = this.get(path26[0]);
       var exact = null;
       if (found) {
-        if (path25.length === 1) {
+        if (path26.length === 1) {
           exact = found;
         } else if (found instanceof Namespace) {
-          path25 = path25.slice(1);
-          exact = found._lookupImpl(path25, path25.join("."));
+          path26 = path26.slice(1);
+          exact = found._lookupImpl(path26, path26.join("."));
         }
       } else {
         for (var i = 0; i < this.nestedArray.length; ++i)
-          if (this._nestedArray[i] instanceof Namespace && (found = this._nestedArray[i]._lookupImpl(path25, flatPath))) {
+          if (this._nestedArray[i] instanceof Namespace && (found = this._nestedArray[i]._lookupImpl(path26, flatPath))) {
             exact = found;
             break;
           }
@@ -4490,28 +4898,28 @@ var require_namespace = __commonJS({
       this._lookupCache[flatPath] = exact;
       return exact;
     };
-    Namespace.prototype.lookupType = function lookupType(path25) {
-      var found = this.lookup(path25, [Type]);
+    Namespace.prototype.lookupType = function lookupType(path26) {
+      var found = this.lookup(path26, [Type]);
       if (!found)
-        throw Error("no such type: " + path25);
+        throw Error("no such type: " + path26);
       return found;
     };
-    Namespace.prototype.lookupEnum = function lookupEnum(path25) {
-      var found = this.lookup(path25, [Enum]);
+    Namespace.prototype.lookupEnum = function lookupEnum(path26) {
+      var found = this.lookup(path26, [Enum]);
       if (!found)
-        throw Error("no such Enum '" + path25 + "' in " + this);
+        throw Error("no such Enum '" + path26 + "' in " + this);
       return found;
     };
-    Namespace.prototype.lookupTypeOrEnum = function lookupTypeOrEnum(path25) {
-      var found = this.lookup(path25, [Type, Enum]);
+    Namespace.prototype.lookupTypeOrEnum = function lookupTypeOrEnum(path26) {
+      var found = this.lookup(path26, [Type, Enum]);
       if (!found)
-        throw Error("no such Type or Enum '" + path25 + "' in " + this);
+        throw Error("no such Type or Enum '" + path26 + "' in " + this);
       return found;
     };
-    Namespace.prototype.lookupService = function lookupService(path25) {
-      var found = this.lookup(path25, [Service]);
+    Namespace.prototype.lookupService = function lookupService(path26) {
+      var found = this.lookup(path26, [Service]);
       if (!found)
-        throw Error("no such Service '" + path25 + "' in " + this);
+        throw Error("no such Service '" + path26 + "' in " + this);
       return found;
     };
     Namespace._configure = function(Type_, Service_, Enum_) {
@@ -5928,13 +6336,13 @@ var require_util = __commonJS({
       Object.defineProperty(object, "$type", { value: enm, enumerable: false });
       return enm;
     };
-    util.setProperty = function setProperty(dst, path25, value, ifNotSet) {
-      function setProp(dst2, path26, value2) {
-        var part = path26.shift();
+    util.setProperty = function setProperty(dst, path26, value, ifNotSet) {
+      function setProp(dst2, path27, value2) {
+        var part = path27.shift();
         if (util.isUnsafeProperty(part))
           return dst2;
-        if (path26.length > 0) {
-          dst2[part] = setProp(dst2[part] || {}, path26, value2);
+        if (path27.length > 0) {
+          dst2[part] = setProp(dst2[part] || {}, path27, value2);
         } else {
           var prevValue = dst2[part];
           if (prevValue && ifNotSet)
@@ -5947,12 +6355,12 @@ var require_util = __commonJS({
       }
       if (typeof dst !== "object")
         throw TypeError("dst must be an object");
-      if (!path25)
+      if (!path26)
         throw TypeError("path must be specified");
-      path25 = path25.split(".");
-      if (path25.length > util.recursionLimit)
+      path26 = path26.split(".");
+      if (path26.length > util.recursionLimit)
         throw Error("max depth exceeded");
-      return setProp(dst, path25, value);
+      return setProp(dst, path26, value);
     };
     Object.defineProperty(util, "decorateRoot", {
       get: function() {
@@ -6498,12 +6906,12 @@ var require_object = __commonJS({
        */
       fullName: {
         get: function() {
-          var path25 = [this.name], ptr = this.parent;
+          var path26 = [this.name], ptr = this.parent;
           while (ptr) {
-            path25.unshift(ptr.name);
+            path26.unshift(ptr.name);
             ptr = ptr.parent;
           }
-          return path25.join(".");
+          return path26.join(".");
         }
       }
     });
@@ -8485,7 +8893,19 @@ function createMessageTypes() {
     { id: 3, name: "pattern", type: "string" },
     { id: 4, name: "tool_call_id", type: "string" }
   ]);
-  addType(root, "GetMcpToolsToolCall", [{ id: 1, name: "args", type: "GetMcpToolsArgs" }]);
+  addType(root, "GetMcpToolsSuccess", [
+    { id: 1, name: "content", type: "string" },
+    { id: 2, name: "output_file_path", type: "string" }
+  ]);
+  addType(root, "GetMcpToolsError", [{ id: 1, name: "error", type: "string" }]);
+  addType(root, "GetMcpToolsAgentResult", [
+    { id: 1, name: "success", type: "GetMcpToolsSuccess" },
+    { id: 2, name: "error", type: "GetMcpToolsError" }
+  ], [{ name: "result", fields: ["success", "error"] }]);
+  addType(root, "GetMcpToolsToolCall", [
+    { id: 1, name: "args", type: "GetMcpToolsArgs" },
+    { id: 2, name: "result", type: "GetMcpToolsAgentResult" }
+  ]);
   addType(root, "GenerateImageToolArgs", [
     { id: 1, name: "description", type: "string" },
     { id: 2, name: "file_path", type: "string" },
@@ -10128,7 +10548,7 @@ function encodeJsonAsValue(v) {
     writeLengthDelimited(out, 6, new Uint8Array(lv));
   } else if (typeof v === "object") {
     const st = [];
-    for (const [key, val] of Object.entries(v).sort(([left], [right]) => left.localeCompare(right))) {
+    for (const [key, val] of Object.entries(v).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
       if (val === void 0)
         continue;
       const entry = [];
@@ -10777,11 +11197,11 @@ function jsonSchemaProperties(schema) {
   if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
     return obj.properties;
   }
-  const nested = obj.jsonSchema;
+  const nested = obj.jsonSchema ?? obj.parameters ?? obj.schema;
   if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-    const props = nested.properties;
-    if (props && typeof props === "object" && !Array.isArray(props)) {
-      return props;
+    const nestedProps = nested.properties;
+    if (nestedProps && typeof nestedProps === "object" && !Array.isArray(nestedProps)) {
+      return nestedProps;
     }
   }
   return void 0;
@@ -10791,7 +11211,7 @@ function opencodePathArg(args) {
     return void 0;
   return str(args.filePath) ?? str(args.path) ?? str(args.file_path);
 }
-function hostToolDialectFromTools(tools) {
+function hostToolDialectFromTools(tools, defaultDialect = OPENCODE_1_TOOL_DIALECT) {
   let filePathKey;
   for (const name14 of ["read", "write", "edit"]) {
     const tool = tools.find((candidate) => candidate.name === name14);
@@ -10808,9 +11228,9 @@ function hostToolDialectFromTools(tools) {
     }
   }
   const names = new Set(tools.map((tool) => tool.name).filter((name14) => typeof name14 === "string"));
-  const shellTool = names.has("shell") && !names.has("bash") ? "shell" : "bash";
+  const shellTool = names.has("shell") && !names.has("bash") ? "shell" : names.has("bash") ? "bash" : defaultDialect.shellTool;
   if (!filePathKey) {
-    filePathKey = shellTool === "shell" ? "path" : "filePath";
+    filePathKey = shellTool === "shell" ? "path" : defaultDialect.filePathKey;
   }
   return { filePathKey, shellTool };
 }
@@ -10842,7 +11262,7 @@ function resolveToolServerIdentity(opencodeName, defaultServer = "opencode", kno
   return { server: defaultServer, toolName: opencodeName, opencodeName };
 }
 function toolsToDescriptors(tools, providerIdentifier = "opencode", knownMcpServers = []) {
-  return [...tools].sort((left, right) => left.name.localeCompare(right.name)).map((t) => {
+  return tools.map((t) => {
     const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers);
     const collisionSafeAlias = COLLISION_SAFE_ALIASES.has(t.name);
     return {
@@ -10908,7 +11328,7 @@ function toolsToMcpDescriptors(tools, providerIdentifier = "opencode", knownMcpS
   if (tools.length === 0)
     return [];
   const byServer = /* @__PURE__ */ new Map();
-  for (const t of [...tools].sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const t of tools) {
     const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers);
     let list = byServer.get(id.server);
     if (!list) {
@@ -10921,14 +11341,7 @@ function toolsToMcpDescriptors(tools, providerIdentifier = "opencode", knownMcpS
       input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema))
     });
   }
-  const orderedServers = [...byServer.keys()].sort((left, right) => {
-    if (left === providerIdentifier)
-      return right === providerIdentifier ? 0 : -1;
-    if (right === providerIdentifier)
-      return 1;
-    return left.localeCompare(right);
-  });
-  return orderedServers.map((server) => ({
+  return [...byServer.keys()].map((server) => ({
     server_name: server,
     server_identifier: server,
     tools: byServer.get(server)
@@ -11276,6 +11689,10 @@ function readRequestResultMetadata(raw, mappedArgs) {
     ...typeof mappedArgs.limit === "number" ? { limit: mappedArgs.limit } : {}
   };
 }
+function writeRequestResultMetadata(raw, mappedArgs) {
+  const requestedPath = str(raw.path) ?? str(raw.filePath) ?? str(raw.file_path) ?? opencodePathArg(mappedArgs);
+  return requestedPath ? { path: requestedPath } : void 0;
+}
 function rejectPartialReadMutation(parsed) {
   if (parsed.localError)
     return;
@@ -11391,11 +11808,11 @@ function parseExecServerMessage(msg, dialect = OPENCODE_1_TOOL_DIALECT) {
     const raw = msg.pi_edit_args ?? {};
     const edits = Array.isArray(raw.edits) ? raw.edits : [];
     const replacement = edits.length === 1 && edits[0] && typeof edits[0] === "object" ? edits[0] : void 0;
-    const path25 = str(raw.path);
+    const path26 = str(raw.path);
     const oldString = replacement ? stringValue(replacement.old_text) : void 0;
     const newString = replacement ? stringValue(replacement.new_text) : void 0;
     const args = {};
-    assignHostFilePath(args, path25, dialect);
+    assignHostFilePath(args, path26, dialect);
     if (oldString !== void 0)
       args.oldString = oldString;
     if (newString !== void 0)
@@ -11406,7 +11823,7 @@ function parseExecServerMessage(msg, dialect = OPENCODE_1_TOOL_DIALECT) {
       toolName: "edit",
       args,
       resultField,
-      localError: path25 && oldString && newString !== void 0 ? void 0 : "Cursor Pi edit cannot be represented safely: expected one non-empty replacement."
+      localError: path26 && oldString && newString !== void 0 ? void 0 : "Cursor Pi edit cannot be represented safely: expected one non-empty replacement."
     };
   }
   const toolName = cursorToolToOpencode[execVariant];
@@ -11414,7 +11831,7 @@ function parseExecServerMessage(msg, dialect = OPENCODE_1_TOOL_DIALECT) {
     return void 0;
   const mapped = mapCursorArgsToOpencode(toolName, msg[execVariant] ?? {}, execVariant, dialect);
   const rawArgs = msg[execVariant] ?? {};
-  const resultMetadata = execVariant === "shell_stream_args" || execVariant === "shell_args" ? shellStreamResultMetadata(rawArgs) : execVariant === "read_args" || execVariant === "pi_read_args" ? readRequestResultMetadata(rawArgs, mapped.args) : execVariant === "grep_args" ? grepRequestResultMetadata(rawArgs) : void 0;
+  const resultMetadata = execVariant === "shell_stream_args" || execVariant === "shell_args" ? shellStreamResultMetadata(rawArgs) : execVariant === "read_args" || execVariant === "pi_read_args" ? readRequestResultMetadata(rawArgs, mapped.args) : execVariant === "write_args" || execVariant === "pi_write_args" ? writeRequestResultMetadata(rawArgs, mapped.args) : execVariant === "grep_args" ? grepRequestResultMetadata(rawArgs) : void 0;
   if (resultMetadata && resultMetadata.timeout_behavior !== 2 && typeof resultMetadata.timeout_ms === "number") {
     mapped.args.timeout = resultMetadata.timeout_ms;
   }
@@ -11496,7 +11913,7 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant, dialect = OPENCODE_
           return { toolName: "write", args, binaryBytes: bytes };
         }
       } else {
-        content = stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText);
+        content = stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText) ?? stringValue(cleaned.contents) ?? stringValue(cleaned.text);
       }
       if (content !== void 0)
         args.content = content;
@@ -11535,17 +11952,17 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant, dialect = OPENCODE_
     }
     case "grep": {
       const pattern = str(cleaned.pattern);
-      const path25 = str(cleaned.path);
+      const path26 = str(cleaned.path);
       const include = str(cleaned.include) ?? str(cleaned.glob);
       if (!pattern) {
         const args2 = { pattern: include ?? "**/*" };
-        if (path25)
-          args2.path = path25;
+        if (path26)
+          args2.path = path26;
         return { toolName: "glob", args: args2 };
       }
       const args = { pattern };
-      if (path25)
-        args.path = path25;
+      if (path26)
+        args.path = path26;
       if (include)
         args.include = include;
       return { toolName: "grep", args };
@@ -11555,9 +11972,9 @@ function mapCursorArgsToOpencode(toolName, raw, execVariant, dialect = OPENCODE_
       const pattern = str(cleaned.pattern) ?? str(cleaned.glob_pattern) ?? str(cleaned.globPattern);
       if (pattern)
         args.pattern = pattern;
-      const path25 = str(cleaned.path) ?? str(cleaned.target_directory) ?? str(cleaned.targetDirectory);
-      if (path25)
-        args.path = path25;
+      const path26 = str(cleaned.path) ?? str(cleaned.target_directory) ?? str(cleaned.targetDirectory);
+      if (path26)
+        args.path = path26;
       return { toolName: "glob", args };
     }
     default:
@@ -12078,6 +12495,13 @@ function toolPathSeparator(filePath) {
   return "/";
 }
 function joinToolPath(root, relative) {
+  const directory = relative.endsWith("/") || relative.endsWith("\\");
+  const joined = joinResolvedToolPath(root, relative);
+  if (!directory || joined.endsWith("/") || joined.endsWith("\\"))
+    return joined;
+  return `${joined}${toolPathSeparator(joined)}`;
+}
+function joinResolvedToolPath(root, relative) {
   if (!isForeignAbsoluteToolPath(root))
     return path5.resolve(root, relative);
   const sep = toolPathSeparator(root);
@@ -12136,15 +12560,131 @@ function resolveToolPath(filePath, workspaceRoot) {
     return filePath;
   return joinToolPath(workspaceRoot, filePath);
 }
+function searchStatusMessage(line) {
+  const trimmed = line.trim().replace(/^#+\s+/, "");
+  for (const message of SEARCH_STATUS_MESSAGES) {
+    if (trimmed === message || trimmed.endsWith(`/${message}`) || trimmed.endsWith(`\\${message}`)) {
+      return message;
+    }
+  }
+  return void 0;
+}
+function collapseSearchStatus(output) {
+  return output.split("\n").map((line) => searchStatusMessage(line) ?? line).join("\n");
+}
+function isSearchStatusReport(output) {
+  const lines = output.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) => searchStatusMessage(line) !== void 0);
+}
+function parseGroupedPathListing(output) {
+  const lines = output.replace(/\n+$/, "").split("\n");
+  const events = [];
+  const stack = [];
+  let sawHeader = false;
+  let inNotes = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (sawHeader)
+        inNotes = true;
+      continue;
+    }
+    if (inNotes) {
+      events.push({ kind: "note", text: line });
+      continue;
+    }
+    const status = searchStatusMessage(line);
+    if (status) {
+      events.push({ kind: "note", text: status });
+      continue;
+    }
+    const header2 = /^(#+)\s+(\S.*?)\s*$/.exec(line);
+    if (header2) {
+      const rawName = header2[2] ?? "";
+      if (!rawName.endsWith("/") && !rawName.endsWith("\\"))
+        return void 0;
+      const depth = header2[1].length - 1;
+      if (depth > stack.length)
+        return void 0;
+      const name14 = rawName.slice(0, -1);
+      if (!name14 || name14 === "." || name14 === "..")
+        return void 0;
+      stack.length = depth;
+      const parent2 = depth === 0 ? "" : stack[depth - 1] ?? "";
+      if (depth > 0 && !parent2)
+        return void 0;
+      const full = parent2 ? joinDisplayPath(parent2, name14) : name14;
+      stack.push(full);
+      events.push({ kind: "dir", depth, path: full });
+      sawHeader = true;
+      continue;
+    }
+    if (line.startsWith(" ") || line.startsWith("	") || /\s/.test(line) || line.includes("://")) {
+      return void 0;
+    }
+    if (line.includes("/") || line.includes("\\"))
+      return void 0;
+    if (!sawHeader) {
+      events.push({ kind: "file", path: line });
+      continue;
+    }
+    const parent = stack[stack.length - 1];
+    if (!parent)
+      return void 0;
+    events.push({ kind: "file", path: joinDisplayPath(parent, line) });
+  }
+  if (!sawHeader)
+    return void 0;
+  const paths = [];
+  const notes = [];
+  let sawFile = false;
+  for (const event of events) {
+    if (event.kind === "note")
+      notes.push(event.text);
+    else if (event.kind === "file") {
+      sawFile = true;
+      paths.push(event.path);
+    }
+  }
+  if (!sawFile && notes.some((note) => searchStatusMessage(note)))
+    return { paths: [], notes };
+  return { paths, notes };
+}
+function joinDisplayPath(parent, child) {
+  if (!parent || parent === ".")
+    return child;
+  if (parent === "/")
+    return `/${child}`;
+  const sep = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+  if (parent.endsWith("/") || parent.endsWith("\\"))
+    return `${parent}${child}`;
+  return `${parent}${sep}${child}`;
+}
+function renderGroupedPathListing(listing, workspaceRoot) {
+  const paths = listing.paths.map((entry) => resolveToolPath(entry, workspaceRoot));
+  if (paths.length === 0) {
+    if (listing.notes.length === 0)
+      return "No files found";
+    return listing.notes.join("\n");
+  }
+  if (listing.notes.length === 0)
+    return paths.join("\n");
+  return [...paths, "", ...listing.notes].join("\n");
+}
 function groundSearchOutput(output, workspaceRoot) {
-  if (!workspaceRoot)
-    return output;
   const normalized = normalizeToolText(output);
-  const first = normalized.split("\n", 1)[0] ?? "";
-  const searchShaped = /^Found \d+ matches/.test(first) || first === "No matches found" || first === "No files found";
-  if (!searchShaped && !isBarePathList(normalized))
-    return output;
-  return normalized.split("\n").map((line) => rewriteSearchPathLine(line, workspaceRoot)).join("\n");
+  const grouped = parseGroupedPathListing(normalized);
+  if (grouped)
+    return renderGroupedPathListing(grouped, workspaceRoot);
+  const collapsed = collapseSearchStatus(normalized);
+  if (isSearchStatusReport(collapsed))
+    return collapsed;
+  if (!workspaceRoot)
+    return collapsed;
+  const first = collapsed.split("\n", 1)[0] ?? "";
+  const searchShaped = /^Found \d+ matches/.test(first) || searchStatusMessage(first) !== void 0;
+  if (!searchShaped && !isBarePathList(collapsed))
+    return collapsed;
+  return collapsed.split("\n").map((line) => rewriteSearchPathLine(line, workspaceRoot)).join("\n");
 }
 function isBarePathList(output) {
   const lines = output.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -12161,8 +12701,9 @@ function isBarePathList(output) {
 function rewriteSearchPathLine(line, workspaceRoot) {
   if (!line || line.startsWith(" ") || line.startsWith("	") || line.startsWith("("))
     return line;
-  if (line.startsWith("Found ") || line === "No matches found" || line === "No files found")
-    return line;
+  const status = searchStatusMessage(line);
+  if (status || line.startsWith("Found "))
+    return status ?? line;
   const header2 = /^(.*):$/.exec(line);
   if (header2 && !header2[1]?.includes("://")) {
     return `${resolveToolPath(header2[1] ?? "", workspaceRoot)}:`;
@@ -12267,20 +12808,27 @@ function grepRequestResultMetadata(raw) {
 }
 function extractGroundedPaths(output, workspaceRoot) {
   const normalized = normalizeToolText(output);
-  const directory = parseOpenCode2DirectoryListing(normalized, workspaceRoot);
+  const grouped = parseGroupedPathListing(normalized);
+  if (grouped) {
+    return grouped.paths.map((entry) => resolveToolPath(entry, workspaceRoot)).slice(0, 2e3);
+  }
+  const collapsed = collapseSearchStatus(normalized);
+  if (isSearchStatusReport(collapsed))
+    return [];
+  const directory = parseOpenCode2DirectoryListing(collapsed, workspaceRoot);
   if (directory)
     return directory.entries.slice(0, 2e3);
-  const first = normalized.split("\n", 1)[0]?.trim() ?? "";
-  if (/^Found \d+ matches/.test(first) || first === "No matches found" || first === "No files found") {
+  const first = collapsed.split("\n", 1)[0]?.trim() ?? "";
+  if (/^Found \d+ matches/.test(first) || searchStatusMessage(first)) {
     const paths = [];
-    for (const raw of normalized.split("\n").slice(1)) {
+    for (const raw of collapsed.split("\n").slice(1)) {
       const line = raw.trim();
-      if (!line || line.startsWith("(") || line.startsWith("Line ") || raw.startsWith(" ") || raw.startsWith("	")) {
+      if (!line || line.startsWith("(") || line.startsWith("Line ") || line.startsWith("#") || searchStatusMessage(line) || raw.startsWith(" ") || raw.startsWith("	")) {
         continue;
       }
       const header2 = /^(.*):$/.exec(line);
       const candidate = header2 && !header2[1]?.includes("://") ? header2[1] ?? "" : line;
-      if (!candidate || candidate.includes("://"))
+      if (!candidate || candidate.includes("://") || searchStatusMessage(candidate))
         continue;
       paths.push(resolveToolPath(candidate, workspaceRoot));
     }
@@ -12842,9 +13390,10 @@ function readFileLineCount(filePath) {
   }
 }
 function extractPathLines(output) {
-  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const paths = lines.filter((l) => l.startsWith("/") || l.startsWith("./") || l.includes("/"));
-  return (paths.length > 0 ? paths : lines).slice(0, 2e3);
+  const lines = collapseSearchStatus(output).split("\n").map((l) => l.trim()).filter(Boolean);
+  const usable = lines.filter((line) => !searchStatusMessage(line) && !/^#+\s+\S/.test(line));
+  const paths = usable.filter((l) => l.startsWith("/") || l.startsWith("./") || l.includes("/"));
+  return (paths.length > 0 ? paths : usable).slice(0, 2e3);
 }
 function countLines(s) {
   if (!s)
@@ -12993,7 +13542,7 @@ function descriptorsFromFlatTools(value) {
     tools
   }));
 }
-var OPENCODE_1_TOOL_DIALECT, CUSTOM_WEBSEARCH_TOOL, CUSTOM_WEBFETCH_TOOL, CUSTOM_LIST_MCP_RESOURCES_TOOL, CUSTOM_READ_MCP_RESOURCE_TOOL, WEB_ALIAS_RULES, COLLISION_SAFE_ALIASES, cursorToolToOpencode, CURSOR_INTERNAL_KEYS, PRESERVE_EMPTY_STRING_KEYS, CURSOR_SUBAGENT_TYPE_TO_OPENCODE, SUBAGENT_CATALOG_MARKER, SUBAGENT_INLINE_MARKER, GENERIC_CURSOR_SUBAGENT_TYPES, MAX_EDIT_SOURCE_BYTES, WIDE_TEXT_ENCODING, OPENCODE2_READ_TRUNCATION, OPENCODE2_READ_MAX_LINES, OPENCODE2_READ_MAX_LINE_CHARS, OPENCODE2_READ_LINE_TRUNCATION, OPENCODE2_MAX_RENDERED_LINE_BYTES, OPENCODE_GREP_LINE, OPENCODE_READ_MAX_BYTES;
+var OPENCODE_1_TOOL_DIALECT, CUSTOM_WEBSEARCH_TOOL, CUSTOM_WEBFETCH_TOOL, CUSTOM_LIST_MCP_RESOURCES_TOOL, CUSTOM_READ_MCP_RESOURCE_TOOL, WEB_ALIAS_RULES, COLLISION_SAFE_ALIASES, cursorToolToOpencode, CURSOR_INTERNAL_KEYS, PRESERVE_EMPTY_STRING_KEYS, CURSOR_SUBAGENT_TYPE_TO_OPENCODE, SUBAGENT_CATALOG_MARKER, SUBAGENT_INLINE_MARKER, GENERIC_CURSOR_SUBAGENT_TYPES, MAX_EDIT_SOURCE_BYTES, WIDE_TEXT_ENCODING, OPENCODE2_READ_TRUNCATION, OPENCODE2_READ_MAX_LINES, OPENCODE2_READ_MAX_LINE_CHARS, OPENCODE2_READ_LINE_TRUNCATION, OPENCODE2_MAX_RENDERED_LINE_BYTES, SEARCH_STATUS_MESSAGES, OPENCODE_GREP_LINE, OPENCODE_READ_MAX_BYTES;
 var init_tools = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/tools.js"() {
     init_messages();
@@ -13145,6 +13694,12 @@ var init_tools = __esm({
     OPENCODE2_READ_MAX_LINE_CHARS = 2e3;
     OPENCODE2_READ_LINE_TRUNCATION = `... (line truncated to ${OPENCODE2_READ_MAX_LINE_CHARS} chars)`;
     OPENCODE2_MAX_RENDERED_LINE_BYTES = OPENCODE2_READ_MAX_LINE_CHARS * 3 + Buffer.byteLength(OPENCODE2_READ_LINE_TRUNCATION, "utf8") + 1;
+    SEARCH_STATUS_MESSAGES = [
+      "No files found matching pattern",
+      "No matches before timeout (scan incomplete)",
+      "No files found",
+      "No matches found"
+    ];
     OPENCODE_GREP_LINE = /^[ \t]+Line (\d+):[ \t]?(.*)$/;
     OPENCODE_READ_MAX_BYTES = 50 * 1024;
   }
@@ -14066,7 +14621,7 @@ function cursorModeSystemReminder(targetModeId, options = {}) {
   if (!id)
     return void 0;
   const first = options.firstTurn !== false;
-  const leavePlan = options.planExitAdvertised === false ? "record the finished plan (Cursor CreatePlan). Writing it needs no approval, and the user is then asked whether to start implementing; if they decline, refine the plan and record it again" : "record the finished plan, then call OpenCode `plan_exit` so the user can approve leaving plan mode";
+  const leavePlan = options.planStageAdvertised ? "record the finished plan with Cursor CreatePlan. The host stage tool waits for the host plan review and does not return until the user accepts or declines. Do not call `plan_exit` to submit or skip that review, and do not implement until the tool returns success" : options.planExitAdvertised === false ? "record the finished plan (Cursor CreatePlan). Writing it needs no approval, and the user is then asked whether to start implementing; if they decline, refine the plan and record it again" : "record the finished plan, then call OpenCode `plan_exit` so the user can approve leaving plan mode";
   if (id === "plan" || id === "spec") {
     return wrapReminder(first ? `Plan mode is active. The user does not want execution yet -- you MUST NOT make edits, run non-readonly tools (including changing configs or making commits), or otherwise modify system state. This supersedes any conflicting instruction.
 
@@ -14145,8 +14700,11 @@ Your mandate is to convert user intent into a correct, high-quality implementati
   }
   return wrapReminder(first ? `Agent mode is active (OpenCode build / agents). You have left plan mode and may implement: edit files, run tools, and execute the agreed approach.
 
+The plan-mode restriction is over. An earlier reminder that forbade edits no longer applies.
+
+- Change file contents with the advertised \`write\` and \`edit\` tools.
 - Prefer making progress with the advertised host tools.
-- If the task is large or ambiguous again, switch back to plan mode (OpenCode \`plan_enter\` / SwitchMode target plan) before a large rewrite.` : `Agent mode is still active. Continue implementing with the advertised host tools. Switch back to plan mode only when a new large/ambiguous design decision appears.`);
+- If the task is large or ambiguous again, switch back to plan mode (OpenCode \`plan_enter\` / SwitchMode target plan) before a large rewrite.` : `Agent mode is still active. Continue implementing with the advertised host tools, and change file contents with \`write\` and \`edit\`. Switch back to plan mode only when a new large/ambiguous design decision appears.`);
 }
 function takeActiveCursorModeReminder(sessionKey, options = {}) {
   if (!sessionKey)
@@ -14164,7 +14722,10 @@ function takeActiveCursorModeReminder(sessionKey, options = {}) {
   }
   const reminder = cursorModeSystemReminder(state.modeId, {
     firstTurn: state.firstTurn,
-    ...advertised ? { planExitAdvertised: advertised.has("plan_exit") } : {}
+    ...advertised ? {
+      planExitAdvertised: advertised.has("plan_exit"),
+      planStageAdvertised: advertised.has("cursor_plan_stage")
+    } : {}
   });
   if (state.firstTurn)
     state.firstTurn = false;
@@ -14191,6 +14752,9 @@ var init_switch_mode = __esm({
 });
 
 // node_modules/cursor-opencode-provider/dist/protocol/tool-call-bridge.js
+function isNativeDisplayToolCall(variant) {
+  return NATIVE_DISPLAY_VARIANTS.has(variant);
+}
 function asRecord3(v) {
   return v && typeof v === "object" && !Array.isArray(v) ? v : void 0;
 }
@@ -14373,7 +14937,7 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
   if (variant === "update_todos_tool_call" || variant === "create_plan_tool_call") {
     const result = asRecord3(payload.result);
     const success = asRecord3(result?.success);
-    const completedTodos = Array.isArray(success?.todos) ? success.todos : void 0;
+    const completedTodos = Array.isArray(success?.todos) && success.todos.length > 0 ? success.todos : void 0;
     const isMerge = variant === "update_todos_tool_call" && args.merge === true;
     const sourceTodos = completedTodos ?? (!isMerge ? args.todos : void 0);
     const canMergeFromPrior = sourceTodos === void 0 && isMerge && Array.isArray(priorMirroredTodos) && priorMirroredTodos.length > 0;
@@ -14386,7 +14950,10 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
         todos.unshift({
           id: "plan",
           content: [name14 && `Plan: ${name14}`, overview, plan].filter(Boolean).join("\n").slice(0, 2e3),
-          status: "pending",
+          // The plan file is already written by the time this display mirror
+          // runs. Leaving it `pending` parks a forever-open row on hosts that
+          // keep todowrite as the user-visible checklist.
+          status: "completed",
           priority: "high"
         });
       }
@@ -14409,18 +14976,18 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
     };
   }
   if (variant === "edit_tool_call") {
-    const path25 = typeof args.path === "string" ? args.path : "";
+    const path26 = typeof args.path === "string" ? args.path : "";
     const content = typeof args.stream_content === "string" ? args.stream_content : void 0;
     return {
       callId,
       variant,
       preferredToolName: "write",
-      args: { path: path25, content },
-      bridgeable: path25.length > 0 && content !== void 0
+      args: { path: path26, content },
+      bridgeable: path26.length > 0 && content !== void 0
     };
   }
   if (variant === "pi_edit_tool_call") {
-    const path25 = typeof args.path === "string" ? args.path : "";
+    const path26 = typeof args.path === "string" ? args.path : "";
     const edits = Array.isArray(args.edits) ? args.edits : [];
     const replacement = edits.length === 1 ? asRecord3(edits[0]) : void 0;
     const oldText = replacement?.old_text;
@@ -14429,8 +14996,8 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
       callId,
       variant,
       preferredToolName: "edit",
-      args: { path: path25, old_string: oldText, new_string: newText },
-      bridgeable: path25.length > 0 && typeof oldText === "string" && oldText.length > 0 && typeof newText === "string"
+      args: { path: path26, old_string: oldText, new_string: newText },
+      bridgeable: path26.length > 0 && typeof oldText === "string" && oldText.length > 0 && typeof newText === "string"
     };
   }
   if (variant === "task_tool_call") {
@@ -14491,12 +15058,12 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
     };
   }
   if (variant === "delete_tool_call") {
-    const path25 = typeof args.path === "string" ? args.path : "";
+    const path26 = typeof args.path === "string" ? args.path : "";
     return {
       callId,
       variant,
       preferredToolName: "bash",
-      args: path25 ? { command: `rm -f -- ${shellQuote3(path25)}` } : { command: "true" }
+      args: path26 ? { command: `rm -f -- ${shellQuote3(path26)}` } : { command: "true" }
     };
   }
   const preferred = VARIANT_TO_OPENCODE[variant] ?? variant.replace(/_tool_call$/, "");
@@ -14510,7 +15077,9 @@ function parseDisplayToolCall(callId, toolCall, priorMirroredTodos) {
 function shellQuote3(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
-function resolveBridgedOpenCodeToolCall(display, advertised) {
+function resolveBridgedOpenCodeToolCall(display, advertised, dialect = OPENCODE_1_TOOL_DIALECT) {
+  if (isNativeDisplayToolCall(display.variant))
+    return void 0;
   if (!DISPLAY_STATE_MIRROR_VARIANTS.has(display.variant))
     return void 0;
   if (display.bridgeable === false)
@@ -14522,7 +15091,7 @@ function resolveBridgedOpenCodeToolCall(display, advertised) {
   for (const toolName of candidates) {
     if (!names.has(toolName))
       continue;
-    const mapped = mapCursorArgsToOpencode(toolName, display.args);
+    const mapped = mapCursorArgsToOpencode(toolName, display.args, void 0, dialect);
     if (toolName === "todowrite") {
       mapped.args = {
         todos: mapTodos(display.args.todos ?? mapped.args.todos)
@@ -14657,9 +15226,9 @@ function listProtobufFieldNumbers(buf) {
   }
   return fields;
 }
-function extractProtobufSubmessage(buf, path25) {
+function extractProtobufSubmessage(buf, path26) {
   let cur = buf;
-  for (const want of path25) {
+  for (const want of path26) {
     if (!cur)
       return void 0;
     let i = 0;
@@ -14733,7 +15302,7 @@ function extractExecDisplayCallId(execMsg) {
   }
   return void 0;
 }
-var TODO_STATUS, VARIANT_TO_OPENCODE, TOOL_CALL_VARIANTS, DISPLAY_STATE_MIRROR_VARIANTS;
+var TODO_STATUS, VARIANT_TO_OPENCODE, TOOL_CALL_VARIANTS, DISPLAY_STATE_MIRROR_VARIANTS, NATIVE_DISPLAY_VARIANTS;
 var init_tool_call_bridge = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/tool-call-bridge.js"() {
     init_tools();
@@ -14780,6 +15349,9 @@ var init_tool_call_bridge = __esm({
       "update_todos_tool_call",
       "read_todos_tool_call",
       "create_plan_tool_call"
+    ]);
+    NATIVE_DISPLAY_VARIANTS = /* @__PURE__ */ new Set([
+      "get_mcp_tools_tool_call"
     ]);
   }
 });
@@ -15249,7 +15821,8 @@ function createPlanApproved(output, isError, question) {
   if (isError)
     return false;
   const [segment] = parseAnswerSegments([createPlanApprovalItem(question)], output);
-  return (segment ?? "").trim().toLowerCase() === CREATE_PLAN_APPROVAL_YES.toLowerCase();
+  const answer = (segment ?? "").trim().toLowerCase();
+  return answer === CREATE_PLAN_APPROVAL_YES.toLowerCase();
 }
 function asRecord5(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
@@ -16760,7 +17333,7 @@ async function scanAgentRoot(root, out) {
     let entries;
     try {
       entries = await readdir3(dir, { withFileTypes: true });
-      entries.sort((a, b) => a.name.localeCompare(b.name));
+      entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     } catch {
       return;
     }
@@ -17000,6 +17573,95 @@ var init_layout = __esm({
   }
 });
 
+// node_modules/cursor-opencode-provider/dist/context/overlay.js
+function utf16(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function inFixedOrder(items, idOf) {
+  return items.map((item) => ({ ...item })).sort((left, right) => utf16(idOf(left), idOf(right)));
+}
+function holdList(cached, incoming, idOf) {
+  const orderedIncoming = inFixedOrder(incoming, idOf);
+  if (!cached || cached.length === 0)
+    return orderedIncoming;
+  const cachedIds = new Set(cached.map(idOf));
+  const hasNew = orderedIncoming.some((item) => !cachedIds.has(idOf(item)));
+  if (!hasNew)
+    return cached;
+  const newcomers = inFixedOrder(orderedIncoming.filter((item) => !cachedIds.has(idOf(item))), idOf);
+  return [...cached, ...newcomers];
+}
+function remember2(conversationId, hold) {
+  const stored = {
+    skills: structuredClone(hold.skills),
+    subagents: structuredClone(hold.subagents),
+    plugins: structuredClone(hold.plugins)
+  };
+  byConversationId2.delete(conversationId);
+  byConversationId2.set(conversationId, stored);
+  while (byConversationId2.size > MAX_OVERLAY_HOLDS) {
+    const oldest = byConversationId2.keys().next().value;
+    if (!oldest)
+      break;
+    byConversationId2.delete(oldest);
+  }
+  return stored;
+}
+function skillId(skill) {
+  return skill.id || skill.full_path;
+}
+function toWire(hold) {
+  return {
+    skills: hold.skills.map(({ full_path, content, description }) => ({
+      full_path,
+      content,
+      description
+    })),
+    subagents: hold.subagents,
+    plugins: hold.plugins
+  };
+}
+function holdCapabilityOverlay(conversationId, live) {
+  if (!conversationId) {
+    return toWire({
+      skills: inFixedOrder(live.skills, skillId),
+      subagents: inFixedOrder(live.subagents, (agent) => agent.name),
+      plugins: inFixedOrder(live.plugins, (plugin) => plugin.id)
+    });
+  }
+  const cached = byConversationId2.get(conversationId);
+  const next = {
+    skills: holdList(cached?.skills, live.skills, skillId),
+    subagents: holdList(cached?.subagents, live.subagents, (agent) => agent.name),
+    plugins: holdList(cached?.plugins, live.plugins, (plugin) => plugin.id)
+  };
+  if (next.skills.length === 0 && next.subagents.length === 0 && next.plugins.length === 0) {
+    byConversationId2.delete(conversationId);
+    return toWire(next);
+  }
+  return toWire(remember2(conversationId, next));
+}
+function clearOverlayHold(conversationId) {
+  byConversationId2.delete(conversationId);
+}
+function transferOverlayHold(previousConversationId, nextConversationId) {
+  if (!previousConversationId || !nextConversationId)
+    return;
+  const hold = byConversationId2.get(previousConversationId);
+  byConversationId2.delete(previousConversationId);
+  byConversationId2.delete(nextConversationId);
+  if (!hold)
+    return;
+  remember2(nextConversationId, hold);
+}
+var MAX_OVERLAY_HOLDS, byConversationId2;
+var init_overlay = __esm({
+  "node_modules/cursor-opencode-provider/dist/context/overlay.js"() {
+    MAX_OVERLAY_HOLDS = 256;
+    byConversationId2 = /* @__PURE__ */ new Map();
+  }
+});
+
 // node_modules/cursor-opencode-provider/dist/context/build.js
 import path17 from "node:path";
 function buildAdvertisedSubagentCatalog(hostSubagents, discoveredAgents) {
@@ -17070,14 +17732,25 @@ async function buildDynamicRequestContextFromDiscovery(input2, workspaceRoot, wo
       prompt: discovered?.prompt || `Delegate to the host-configured ${agent.name} subagent; its host instructions and tools apply.`
     };
   });
+  const liveSkills = skills.map((s) => ({
+    id: s.name,
+    full_path: s.fullPath,
+    content: s.content,
+    description: s.description
+  }));
+  const livePlugins = plugins.map((p) => ({
+    id: p.id,
+    line: `opencode-plugin:${p.source}:${p.id}`
+  }));
+  const overlay = input2.conversationId ? holdCapabilityOverlay(input2.conversationId, {
+    skills: liveSkills,
+    subagents: customSubagents,
+    plugins: livePlugins
+  }) : { skills: liveSkills.map(({ full_path, content, description }) => ({ full_path, content, description })), subagents: customSubagents, plugins: livePlugins };
   const dynamic = {
     tools: flat,
-    agent_skills: skills.map((s) => ({
-      full_path: s.fullPath,
-      content: s.content,
-      description: s.description
-    })),
-    custom_subagents: customSubagents,
+    agent_skills: overlay.skills,
+    custom_subagents: overlay.subagents,
     mcp_file_system_options: {
       enabled: true,
       // Cursor metadata root (mcps / agent-tools), not the git workspace.
@@ -17099,8 +17772,8 @@ async function buildDynamicRequestContextFromDiscovery(input2, workspaceRoot, wo
     mcp_file_system_info_complete: true,
     mcp_info_complete: true
   };
-  if (plugins.length > 0) {
-    dynamic.hooks_additional_context = plugins.map((p) => `opencode-plugin:${p.source}:${p.id}`).join("\n");
+  if (overlay.plugins.length > 0) {
+    dynamic.hooks_additional_context = overlay.plugins.map((p) => p.line).join("\n");
   }
   return dynamic;
 }
@@ -17140,6 +17813,7 @@ var init_build = __esm({
     init_layout();
     init_env();
     init_paths();
+    init_overlay();
     init_debug();
     DYNAMIC_REQUEST_CONTEXT_KEYS = [
       "tools",
@@ -17168,6 +17842,177 @@ var init_build = __esm({
   }
 });
 
+// node_modules/cursor-opencode-provider/dist/context/epoch.js
+import { createHash as createHash2 } from "node:crypto";
+function sha(text) {
+  return createHash2("sha256").update(text).digest("hex");
+}
+function joinSections(parts) {
+  return parts.map((part) => part?.trim()).filter((part) => !!part).join("\n\n");
+}
+function snapshotOf(input2) {
+  return {
+    hostSystemHash: sha(input2.hostSystem?.trim() || ""),
+    guidanceHash: sha(input2.guidance?.trim() || ""),
+    hostAgent: input2.hostAgent?.trim() || "",
+    workspaceRoot: input2.workspaceRoot
+  };
+}
+function buildBaseline(input2) {
+  return joinSections([input2.hostSystem, input2.guidance]);
+}
+function wrapReminder2(body) {
+  const trimmed = body.trim();
+  if (!trimmed)
+    return "";
+  if (trimmed.startsWith("<system_reminder>"))
+    return trimmed;
+  return `<system_reminder>
+${trimmed}
+</system_reminder>`;
+}
+function renderSourceUpdates(previous, next, live) {
+  const parts = [];
+  if (next.hostAgent && previous.hostAgent !== next.hostAgent) {
+    parts.push(wrapReminder2(`Host primary agent is now ${JSON.stringify(next.hostAgent)}. Follow this agent's instructions and tool permissions for the rest of the turn. This is a chronological context update; the original system baseline is unchanged.`));
+  }
+  if (live.hostSystem?.trim() && previous.hostSystemHash !== next.hostSystemHash) {
+    parts.push(wrapReminder2("Host system instructions were updated for this session. Effective instructions:\n\n" + live.hostSystem.trim()));
+  }
+  if (live.guidance?.trim() && previous.guidanceHash !== next.guidanceHash) {
+    parts.push(wrapReminder2("OpenCode interaction guidance was updated for this session:\n\n" + live.guidance.trim()));
+  }
+  if (previous.workspaceRoot !== next.workspaceRoot && next.workspaceRoot) {
+    parts.push(wrapReminder2(`Workspace root is now ${JSON.stringify(next.workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix.`));
+  }
+  return parts.filter(Boolean);
+}
+function touch(epoch) {
+  byConversationId3.delete(epoch.conversationId);
+  byConversationId3.set(epoch.conversationId, epoch);
+  while (byConversationId3.size > MAX_CONTEXT_EPOCHS) {
+    const oldest = byConversationId3.keys().next().value;
+    if (!oldest)
+      break;
+    byConversationId3.delete(oldest);
+  }
+}
+function combineMessages(parts) {
+  const text = parts.map((part) => part.trim()).filter(Boolean).join("\n\n");
+  return text || void 0;
+}
+function admitContextEpoch(input2) {
+  const conversationId = input2.conversationId;
+  const nextSnap = snapshotOf(input2);
+  const oneShots = (input2.oneShotReminders ?? []).map((part) => part.trim()).filter(Boolean);
+  const existing = byConversationId3.get(conversationId);
+  if (!existing) {
+    if (input2.hasCheckpoint) {
+      const epoch2 = {
+        conversationId,
+        baselineSystemPrompt: "",
+        baselineHash: "",
+        recovered: true,
+        snapshot: nextSnap
+      };
+      touch(epoch2);
+      const midConversationMessage2 = combineMessages(oneShots);
+      trace(`context epoch: recovered conversationId=${conversationId} oneShots=${oneShots.length}`);
+      return { action: "recovered", midConversationMessage: midConversationMessage2, epoch: epoch2 };
+    }
+    const baselineSystemPrompt = buildBaseline(input2);
+    const baselineHash = sha(baselineSystemPrompt);
+    const epoch = {
+      conversationId,
+      baselineSystemPrompt,
+      baselineHash,
+      recovered: false,
+      snapshot: nextSnap
+    };
+    touch(epoch);
+    trace(`context epoch: initialize conversationId=${conversationId} baselineHash=${baselineHash.slice(0, 16)} baselineLen=${baselineSystemPrompt.length} oneShots=${oneShots.length}`);
+    return {
+      action: "initialize",
+      seedSystemPrompt: baselineSystemPrompt || void 0,
+      midConversationMessage: combineMessages(oneShots),
+      epoch
+    };
+  }
+  const observedSnap = {
+    hostSystemHash: input2.hostSystem?.trim() ? nextSnap.hostSystemHash : existing.snapshot.hostSystemHash,
+    guidanceHash: input2.guidance?.trim() ? nextSnap.guidanceHash : existing.snapshot.guidanceHash,
+    hostAgent: input2.hostAgent?.trim() ? nextSnap.hostAgent : existing.snapshot.hostAgent,
+    workspaceRoot: nextSnap.workspaceRoot || existing.snapshot.workspaceRoot
+  };
+  const updates = renderSourceUpdates(existing.snapshot, observedSnap, input2);
+  const changed = existing.snapshot.hostSystemHash !== observedSnap.hostSystemHash || existing.snapshot.guidanceHash !== observedSnap.guidanceHash || existing.snapshot.hostAgent !== observedSnap.hostAgent || existing.snapshot.workspaceRoot !== observedSnap.workspaceRoot;
+  if (changed) {
+    existing.snapshot = observedSnap;
+  }
+  touch(existing);
+  if (input2.hasCheckpoint) {
+    const midConversationMessage2 = combineMessages([...updates, ...oneShots]);
+    if (changed || oneShots.length) {
+      trace(`context epoch: ${changed ? "updated" : "unchanged"} conversationId=${conversationId} checkpoint=1 updates=${updates.length} oneShots=${oneShots.length}`);
+    }
+    return {
+      action: changed ? "updated" : "unchanged",
+      midConversationMessage: midConversationMessage2,
+      epoch: existing
+    };
+  }
+  if (existing.recovered && !existing.baselineSystemPrompt) {
+    const midConversationMessage2 = combineMessages([...updates, ...oneShots]);
+    trace(`context epoch: recovered-hold conversationId=${conversationId} checkpoint=0 updates=${updates.length} oneShots=${oneShots.length} seed=omitted`);
+    return {
+      action: changed ? "updated" : "recovered",
+      midConversationMessage: midConversationMessage2,
+      epoch: existing
+    };
+  }
+  const midConversationMessage = combineMessages([...updates, ...oneShots]);
+  if (changed) {
+    trace(`context epoch: updated conversationId=${conversationId} checkpoint=0 updates=${updates.length} seed=frozen-baseline`);
+  }
+  return {
+    action: changed ? "updated" : "unchanged",
+    seedSystemPrompt: existing.baselineSystemPrompt || void 0,
+    midConversationMessage,
+    epoch: existing
+  };
+}
+function clearContextEpoch(conversationId) {
+  if (!conversationId)
+    return;
+  if (byConversationId3.delete(conversationId)) {
+    trace(`context epoch: cleared conversationId=${conversationId}`);
+  }
+}
+function endContextEpoch(previousConversationId, nextConversationId) {
+  clearContextEpoch(previousConversationId);
+  if (nextConversationId)
+    clearContextEpoch(nextConversationId);
+}
+function appendMidConversationMessage(userText, midConversationMessage) {
+  if (!midConversationMessage?.trim())
+    return userText;
+  if (!userText.trim())
+    return midConversationMessage.trim();
+  if (userText.includes(midConversationMessage.trim()))
+    return userText;
+  return `${userText}
+
+${midConversationMessage.trim()}`;
+}
+var MAX_CONTEXT_EPOCHS, byConversationId3;
+var init_epoch = __esm({
+  "node_modules/cursor-opencode-provider/dist/context/epoch.js"() {
+    init_debug();
+    MAX_CONTEXT_EPOCHS = 256;
+    byConversationId3 = /* @__PURE__ */ new Map();
+  }
+});
+
 // node_modules/cursor-opencode-provider/dist/context/frozen.js
 function freezeSnapshot(value, seen = /* @__PURE__ */ new Set()) {
   if (!value || typeof value !== "object")
@@ -17180,45 +18025,46 @@ function freezeSnapshot(value, seen = /* @__PURE__ */ new Set()) {
     freezeSnapshot(child, seen);
   return Object.freeze(value);
 }
-function remember2(conversationId, context) {
-  byConversationId2.delete(conversationId);
-  byConversationId2.set(conversationId, freezeSnapshot(structuredClone(context)));
+function remember3(conversationId, context) {
+  byConversationId4.delete(conversationId);
+  byConversationId4.set(conversationId, freezeSnapshot(structuredClone(context)));
   materializedByConversationId.delete(conversationId);
-  while (byConversationId2.size > MAX_FROZEN_REQUEST_CONTEXTS) {
-    const oldest = byConversationId2.keys().next().value;
+  while (byConversationId4.size > MAX_FROZEN_REQUEST_CONTEXTS) {
+    const oldest = byConversationId4.keys().next().value;
     if (!oldest)
       break;
-    byConversationId2.delete(oldest);
+    byConversationId4.delete(oldest);
     materializedByConversationId.delete(oldest);
+    clearOverlayHold(oldest);
   }
 }
 function getFrozenRequestContext(conversationId) {
-  const frozen = byConversationId2.get(conversationId);
+  const frozen = byConversationId4.get(conversationId);
   if (!frozen)
     return void 0;
-  byConversationId2.delete(conversationId);
-  byConversationId2.set(conversationId, frozen);
+  byConversationId4.delete(conversationId);
+  byConversationId4.set(conversationId, frozen);
   return frozen;
 }
 function setFrozenRequestContext(conversationId, context) {
   if (!conversationId)
     return;
-  remember2(conversationId, requestContextBase(context));
-}
-function clearFrozenRequestContext(conversationId) {
-  byConversationId2.delete(conversationId);
-  materializedByConversationId.delete(conversationId);
+  remember3(conversationId, requestContextBase(context));
 }
 function transferFrozenRequestContext(previousConversationId, nextConversationId) {
   if (!previousConversationId || !nextConversationId)
     return false;
-  const base = byConversationId2.get(previousConversationId);
+  const base = byConversationId4.get(previousConversationId);
   const materialized = materializedByConversationId.get(previousConversationId);
-  clearFrozenRequestContext(previousConversationId);
-  clearFrozenRequestContext(nextConversationId);
+  endContextEpoch(previousConversationId, nextConversationId);
+  transferOverlayHold(previousConversationId, nextConversationId);
+  byConversationId4.delete(previousConversationId);
+  materializedByConversationId.delete(previousConversationId);
+  byConversationId4.delete(nextConversationId);
+  materializedByConversationId.delete(nextConversationId);
   if (!base)
     return false;
-  remember2(nextConversationId, base);
+  remember3(nextConversationId, base);
   if (materialized) {
     materializedByConversationId.set(nextConversationId, {
       context: materialized.context,
@@ -17249,10 +18095,13 @@ function rememberMaterialized(conversationId, context) {
   return { context: frozen, reused: false };
 }
 async function getOrBuildRequestContext(conversationId, input2, opts) {
+  const scoped = conversationId ? { ...input2, conversationId } : input2;
+  if (opts?.refresh && conversationId)
+    clearOverlayHold(conversationId);
   if (!opts?.refresh && conversationId) {
     const base = getFrozenRequestContext(conversationId);
     if (base) {
-      const dynamic = await buildDynamicRequestContext(input2);
+      const dynamic = await buildDynamicRequestContext(scoped);
       const materialized2 = rememberMaterialized(conversationId, materializeRequestContext(base, dynamic));
       trace(`request_context: materialized conversationId=${conversationId} tools=${Array.isArray(materialized2.context.tools) ? materialized2.context.tools.length : 0} reused=${materialized2.reused}`);
       return materialized2;
@@ -17262,10 +18111,10 @@ async function getOrBuildRequestContext(conversationId, input2, opts) {
     const inFlight = buildsByConversationId.get(conversationId);
     if (inFlight) {
       await inFlight;
-      return getOrBuildRequestContext(conversationId, input2);
+      return getOrBuildRequestContext(conversationId, scoped);
     }
   }
-  const build = buildRequestContext(input2);
+  const build = buildRequestContext(scoped);
   if (conversationId)
     buildsByConversationId.set(conversationId, build);
   let context;
@@ -17282,13 +18131,15 @@ async function getOrBuildRequestContext(conversationId, input2, opts) {
   trace(`request_context: built+frozen conversationId=${conversationId || "(none)"} tools=${Array.isArray(materialized.context.tools) ? materialized.context.tools.length : 0} refresh=${!!opts?.refresh}`);
   return { context: materialized.context, reused: false };
 }
-var byConversationId2, materializedByConversationId, buildsByConversationId, MAX_FROZEN_REQUEST_CONTEXTS;
+var byConversationId4, materializedByConversationId, buildsByConversationId, MAX_FROZEN_REQUEST_CONTEXTS;
 var init_frozen = __esm({
   "node_modules/cursor-opencode-provider/dist/context/frozen.js"() {
     init_build();
+    init_epoch();
+    init_overlay();
     init_debug();
     init_messages();
-    byConversationId2 = /* @__PURE__ */ new Map();
+    byConversationId4 = /* @__PURE__ */ new Map();
     materializedByConversationId = /* @__PURE__ */ new Map();
     buildsByConversationId = /* @__PURE__ */ new Map();
     MAX_FROZEN_REQUEST_CONTEXTS = 256;
@@ -17296,8 +18147,12 @@ var init_frozen = __esm({
 });
 
 // node_modules/cursor-opencode-provider/dist/protocol/conversation-bind.js
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 function rememberConversation(sessionKey, conversationId) {
+  if (conversationId === sessionIdToUuid(sessionKey))
+    remintedBySession.delete(sessionKey);
+  else
+    remintedBySession.set(sessionKey, conversationId);
   activeBySession.delete(sessionKey);
   activeBySession.set(sessionKey, conversationId);
   while (activeBySession.size > MAX_ACTIVE_CONVERSATION_BINDINGS) {
@@ -17305,16 +18160,13 @@ function rememberConversation(sessionKey, conversationId) {
     if (!oldest)
       break;
     activeBySession.delete(oldest[0]);
-    clearCheckpoint(oldest[1]);
-    clearConversationBlobs(oldest[1]);
-    clearFrozenRequestContext(oldest[1]);
   }
 }
 function hasConversationBinding(sessionKey) {
-  return activeBySession.has(sessionKey);
+  return activeBySession.has(sessionKey) || remintedBySession.has(sessionKey);
 }
 function isActiveConversationBinding(sessionKey, conversationId) {
-  return activeBySession.get(sessionKey) === conversationId;
+  return (activeBySession.get(sessionKey) ?? remintedBySession.get(sessionKey) ?? sessionIdToUuid(sessionKey)) === conversationId;
 }
 function restoreConversationBinding(sessionKey, conversationId) {
   if (!sessionKey || !conversationId)
@@ -17322,7 +18174,7 @@ function restoreConversationBinding(sessionKey, conversationId) {
   rememberConversation(sessionKey, conversationId);
 }
 function sessionIdToUuid(sessionId) {
-  const hash = createHash2("sha256").update(`cursor-opencode-provider:conv:${sessionId}`).digest();
+  const hash = createHash3("sha256").update(`cursor-opencode-provider:conv:${sessionId}`).digest();
   const bytes = Buffer.from(hash.subarray(0, 16));
   bytes[6] = bytes[6] & 15 | 64;
   bytes[8] = bytes[8] & 63 | 128;
@@ -17333,7 +18185,7 @@ function resolveConversationGroupId(sessionKey, conversationId) {
   return sessionKey ? sessionIdToUuid(sessionKey) : conversationId;
 }
 function peekConversationId(sessionKey) {
-  let id = activeBySession.get(sessionKey);
+  let id = activeBySession.get(sessionKey) ?? remintedBySession.get(sessionKey);
   if (!id) {
     id = sessionIdToUuid(sessionKey);
   }
@@ -17348,7 +18200,7 @@ function bindConversationId(sessionKey, opts) {
     return { conversationId: crypto.randomUUID(), reset: !!opts?.reset };
   }
   if (opts?.reset) {
-    const previousId = activeBySession.get(sessionKey) ?? sessionIdToUuid(sessionKey);
+    const previousId = activeBySession.get(sessionKey) ?? remintedBySession.get(sessionKey) ?? sessionIdToUuid(sessionKey);
     const conversationId = crypto.randomUUID();
     clearCheckpoint(previousId);
     clearConversationBlobs(previousId);
@@ -17358,19 +18210,20 @@ function bindConversationId(sessionKey, opts) {
   }
   return { conversationId: peekConversationId(sessionKey), reset: false };
 }
-var activeBySession, MAX_ACTIVE_CONVERSATION_BINDINGS;
+var activeBySession, remintedBySession, MAX_ACTIVE_CONVERSATION_BINDINGS;
 var init_conversation_bind = __esm({
   "node_modules/cursor-opencode-provider/dist/protocol/conversation-bind.js"() {
     init_checkpoint();
     init_blob_store();
     init_frozen();
     activeBySession = /* @__PURE__ */ new Map();
+    remintedBySession = /* @__PURE__ */ new Map();
     MAX_ACTIVE_CONVERSATION_BINDINGS = 256;
   }
 });
 
 // node_modules/cursor-opencode-provider/dist/protocol/conversation-persistence.js
-import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID2 } from "node:crypto";
 import path18 from "node:path";
 import { chmod, link, mkdir, readFile as readFile4, readdir as readdir6, rename, unlink, writeFile } from "node:fs/promises";
 import { constants as zlibConstants, gunzipSync as gunzipSync2, gzipSync as gzipSync2 } from "node:zlib";
@@ -17388,7 +18241,7 @@ function conversationCacheDirectoryPath(cacheDir) {
 }
 function sessionFileName(sessionKey) {
   const label = sessionKey.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-  const hash = createHash3("sha256").update(sessionKey).digest("hex");
+  const hash = createHash4("sha256").update(sessionKey).digest("hex");
   return `${label || "session"}-${hash}.pb.gz`;
 }
 function conversationCacheFilePath(cacheDir, sessionKey) {
@@ -18090,8 +18943,16 @@ var init_session = __esm({
             if (this.isPumping(prior)) {
               trace(`sessionManager.registerSession: openCodeSessionId=${session.openCodeSessionId} has a still-pumping prior session ${prior.sessionId} (pending=${prior.pending.size}) \u2014 leaving it to finish or expire naturally instead of interrupting it`);
             } else {
-              trace(`sessionManager.registerSession: superseding stale session ${prior.sessionId} (openCodeSessionId=${session.openCodeSessionId}, pending=${prior.pending.size}) with new session ${session.sessionId}`);
-              this.close(prior, "superseded-by-new-run");
+              const settled = this.settleBridgedPending(prior);
+              if (settled > 0) {
+                trace(`sessionManager.registerSession: settled ${settled} bridged pending on prior session ${prior.sessionId} before supersede`);
+              }
+              if (prior.pending.size > 0) {
+                trace(`sessionManager.registerSession: openCodeSessionId=${session.openCodeSessionId} has prior session ${prior.sessionId} with ${prior.pending.size} still-pending exec(s) \u2014 refusing supersede; leaving held Run for cancel/drain/continuation`);
+              } else {
+                trace(`sessionManager.registerSession: superseding stale session ${prior.sessionId} (openCodeSessionId=${session.openCodeSessionId}, pending=${prior.pending.size}) with new session ${session.sessionId}`);
+                this.close(prior, "superseded-by-new-run");
+              }
             }
           }
           this.byOpenCodeSessionId.set(session.openCodeSessionId, session);
@@ -18099,14 +18960,54 @@ var init_session = __esm({
         this.enforceOpenSessionCap(session);
         this.subscribeTerminal(session);
       }
+      /** Live open Run for this OpenCode session id, if any. */
+      findOpenByOpenCodeSessionId(openCodeSessionId) {
+        if (!openCodeSessionId)
+          return void 0;
+        const session = this.byOpenCodeSessionId.get(openCodeSessionId);
+        return session && !session.closed ? session : void 0;
+      }
+      isActivelyPumping(session) {
+        return this.isPumping(session);
+      }
+      /**
+       * Clear display-only bridged pendings that do not require a Cursor exec write.
+       * Used when the host starts a fresh user turn instead of returning the bridged
+       * tool result (e.g. human `continue` while a todowrite mirror is outstanding).
+       *
+       * @returns number of bridged pendings settled
+       */
+      settleBridgedPending(session) {
+        if (session.closed)
+          return 0;
+        let settled = 0;
+        for (const [execId, pending4] of [...session.pending.entries()]) {
+          if (!pending4.bridged)
+            continue;
+          if (pending4.state === "claimed")
+            continue;
+          const key = this.key(session.sessionId, execId);
+          this.putTombstone(key, "delivered");
+          session.pending.delete(execId);
+          this.byExecId.delete(key);
+          settled++;
+        }
+        if (settled > 0) {
+          if (session.pending.size === 0)
+            this.recordSemanticProgress(session);
+          this.scheduleHardDeadline(session);
+        }
+        return settled;
+      }
       isPumping(session) {
         return session.pumpOwner != null || session.pumpActive;
       }
       /**
        * Force-close the oldest idle open session(s) once registration exceeds the
-       * cap. Never closes a session with a live pull() mid-await (see the same
-       * guard in the supersede check above) — an unclosable backlog of genuinely
-       * active sessions just means the cap can't be enforced until one finishes.
+       * cap. Never closes a session with a live pull() mid-await, or one still
+       * holding pending execs (continuation / fresh-turn cancel+drain owns those).
+       * An unclosable backlog of genuinely active sessions just means the cap
+       * can't be enforced until one finishes.
        */
       enforceOpenSessionCap(justRegistered) {
         while (this.sessions.size > this.maxOpenSessions) {
@@ -18114,11 +19015,13 @@ var init_session = __esm({
           for (const candidate of this.sessions) {
             if (candidate === justRegistered || this.isPumping(candidate))
               continue;
+            if (candidate.pending.size > 0)
+              continue;
             if (!oldest || candidate.createdAt < oldest.createdAt)
               oldest = candidate;
           }
           if (!oldest) {
-            trace(`sessionManager.registerSession: open session cap exceeded (${this.sessions.size} > ${this.maxOpenSessions}) but no idle session is available to close \u2014 all remaining sessions are actively pumping`);
+            trace(`sessionManager.registerSession: open session cap exceeded (${this.sessions.size} > ${this.maxOpenSessions}) but no idle session is available to close \u2014 all remaining sessions are pumping or held-pending`);
             return;
           }
           trace(`sessionManager.registerSession: open session cap exceeded (${this.sessions.size} > ${this.maxOpenSessions}), force-closing oldest idle session ${oldest.sessionId} (openCodeSessionId=${oldest.openCodeSessionId ?? "-"}, ageMs=${this.now() - oldest.createdAt}, pending=${oldest.pending.size})`);
@@ -18893,14 +19796,14 @@ var init_models = __esm({
 });
 
 // node_modules/cursor-opencode-provider/dist/agent-url.js
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 function normalizeApiBaseURL(baseURL) {
   if (!baseURL)
     return DEFAULT_API_BASE;
   return new URL(baseURL).origin;
 }
 function resolveCacheKey(token, options) {
-  const tokenHash = createHash4("sha256").update(token).digest("hex").slice(0, 16);
+  const tokenHash = createHash5("sha256").update(token).digest("hex").slice(0, 16);
   return `${tokenHash}|${normalizeApiBaseURL(options.apiBaseURL ?? options.baseURL)}|telem:${options.telemetryEnabled === true}`;
 }
 async function resolveAgentUrl(token, options = {}) {
@@ -18956,8 +19859,25 @@ var init_compaction_marker = __esm({
 });
 
 // node_modules/cursor-opencode-provider/dist/session-directory.js
+import path20 from "node:path";
 function getSessionDirectory(sessionID) {
   return typeof sessionID === "string" ? sessionDirectories.get(sessionID) : void 0;
+}
+function opencodeDirectoryHeader(headers) {
+  if (!headers)
+    return void 0;
+  const raw = headers["x-opencode-directory"] ?? headers["X-Opencode-Directory"];
+  if (typeof raw !== "string" || raw.trim().length === 0)
+    return void 0;
+  const trimmed = raw.trim();
+  try {
+    return decodeURIComponent(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+function resolveSessionWorkspaceRoot(input2) {
+  return path20.resolve(opencodeDirectoryHeader(input2.headers) ?? getSessionDirectory(input2.sessionKey) ?? (input2.workspaceRoot || input2.cwd || process.cwd()));
 }
 var sessionDirectories;
 var init_session_directory = __esm({
@@ -19290,9 +20210,9 @@ Error message: ${getErrorMessage(cause)}`,
 });
 
 // node_modules/cursor-opencode-provider/dist/image-input.js
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { readFile as readFile6, stat as stat6 } from "node:fs/promises";
-import path20 from "node:path";
+import path21 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function hasCursorUserImages(lastUser) {
   return !!lastUser && Array.isArray(lastUser.content) && lastUser.content.some((part) => {
@@ -19367,7 +20287,7 @@ function cursorImageBudget(value) {
   return Math.min(MAX_CURSOR_IMAGE_INPUT_BYTES, Math.max(0, Math.floor(value)));
 }
 function imageContentHash(data) {
-  return createHash5("sha256").update(data).digest("hex");
+  return createHash6("sha256").update(data).digest("hex");
 }
 async function readResponseBytes(response, remaining) {
   const declaredLength = Number(response.headers.get("content-length"));
@@ -19417,7 +20337,7 @@ async function resolveImageData(value, remaining, signal) {
     const filePath = fileURLToPath2(value);
     const info = await stat6(filePath);
     assertImageSize(info.size, remaining);
-    return { data: Uint8Array.from(await readFile6(filePath)), filename: path20.basename(filePath) };
+    return { data: Uint8Array.from(await readFile6(filePath)), filename: path21.basename(filePath) };
   }
   if (value.protocol !== "http:" && value.protocol !== "https:") {
     return unsupported("image URL input", `Cursor provider does not support image URL protocol ${JSON.stringify(value.protocol)}`);
@@ -19429,7 +20349,7 @@ async function resolveImageData(value, remaining, signal) {
   return {
     data: await readResponseBytes(response, remaining),
     mimeType: response.headers.get("content-type")?.split(";", 1)[0]?.trim() || void 0,
-    filename: path20.basename(value.pathname) || void 0
+    filename: path21.basename(value.pathname) || void 0
   };
 }
 async function decodeCursorImagePart(file, remaining, signal, defaultFilename, resolveLimit = remaining) {
@@ -19448,7 +20368,7 @@ async function decodeCursorImagePart(file, remaining, signal, defaultFilename, r
   }
   return {
     data: resolved.data,
-    filename: (typeof file.filename === "string" && file.filename ? path20.basename(file.filename) : void 0) ?? resolved.filename ?? defaultFilename,
+    filename: (typeof file.filename === "string" && file.filename ? path21.basename(file.filename) : void 0) ?? resolved.filename ?? defaultFilename,
     mimeType
   };
 }
@@ -19470,22 +20390,40 @@ async function extractCursorUserImages(lastUser, signal, maxBytes = MAX_CURSOR_I
   }
   return images;
 }
+function pushImageFileParts(parts, content) {
+  for (const part of content) {
+    if (!part || typeof part !== "object")
+      continue;
+    const file = part;
+    if (file.type === "file" && typeof file.mediaType === "string" && file.mediaType.startsWith("image/"))
+      parts.push(file);
+  }
+}
 function cursorHistoryImageParts(prompt) {
   const parts = [];
-  for (const message of prompt) {
+  let lastUserIndex = -1;
+  for (let i = 0; i < prompt.length; i++) {
+    const message = prompt[i];
+    if (!message || typeof message !== "object")
+      continue;
+    if (message.role === "user")
+      lastUserIndex = i;
+  }
+  for (let i = 0; i < prompt.length; i++) {
+    const message = prompt[i];
     if (!message || typeof message !== "object")
       continue;
     const record = message;
     if (!Array.isArray(record.content))
       continue;
+    if (record.role === "user") {
+      if (i === lastUserIndex)
+        continue;
+      pushImageFileParts(parts, record.content);
+      continue;
+    }
     if (record.role === "assistant") {
-      for (const part of record.content) {
-        if (!part || typeof part !== "object")
-          continue;
-        const file = part;
-        if (file.type === "file" && typeof file.mediaType === "string" && file.mediaType.startsWith("image/"))
-          parts.push(file);
-      }
+      pushImageFileParts(parts, record.content);
       continue;
     }
     if (record.role !== "tool")
@@ -19541,9 +20479,12 @@ async function extractCursorPromptImages(prompt, lastUser, options) {
   const maxBytes = cursorImageBudget(options.maxBytes ?? MAX_CURSOR_IMAGE_INPUT_BYTES);
   const userImages = await extractCursorUserImages(lastUser, options.signal, maxBytes);
   const userBytes = userImages.reduce((total, image) => total + image.data.length, 0);
+  const seenHashes = new Set(options.seenHistoryHashes);
+  for (const image of userImages)
+    seenHashes.add(imageContentHash(image.data));
   const history = await extractCursorHistoryImages(prompt, {
     supportsImages: options.supportsImages,
-    seenHashes: options.seenHistoryHashes,
+    seenHashes,
     signal: options.signal,
     maxBytes: maxBytes - userBytes,
     filenameOffset: userImages.length
@@ -19614,6 +20555,12 @@ var init_pricing_data = __esm({
         "output": 25,
         "cache_read": 0.5,
         "cache_write": 6.25
+      },
+      "claude-opus-5-5": {
+        "input": 4,
+        "output": 20,
+        "cache_read": 0.2,
+        "cache_write": 5
       },
       "claude-sonnet-4": {
         "input": 3,
@@ -19801,6 +20748,26 @@ var init_pricing_data = __esm({
         "output": 12,
         "cache_read": 1
       },
+      "grok-4.7": {
+        "input": 2,
+        "output": 6,
+        "cache_read": 0.5,
+        "context_over_200k": {
+          "input": 4,
+          "output": 12,
+          "cache_read": 1
+        }
+      },
+      "grok-4.7-fast": {
+        "input": 4,
+        "output": 12,
+        "cache_read": 1,
+        "context_over_200k": {
+          "input": 6,
+          "output": 18,
+          "cache_read": 1.5
+        }
+      },
       "kimi-k2.7-code": {
         "input": 0.95,
         "output": 4,
@@ -19849,6 +20816,10 @@ var init_pricing_data = __esm({
         "maxContext": 3e5,
         "maxContextForMaxMode": 1e6
       },
+      "claude-opus-5-5": {
+        "maxContext": 3e5,
+        "maxContextForMaxMode": 1e6
+      },
       "claude-sonnet-4": {
         "maxContext": 2e5,
         "maxContextForMaxMode": 1e6
@@ -19942,6 +20913,10 @@ var init_pricing_data = __esm({
       },
       "grok-4.6": {
         "maxContext": 256e3
+      },
+      "grok-4.7": {
+        "maxContext": 256e3,
+        "maxContextForMaxMode": 5e5
       },
       "kimi-k2.7-code": {
         "maxContext": 262e3
@@ -19980,6 +20955,9 @@ var init_pricing_data = __esm({
       "claude-opus-5": {
         "supportsImages": true
       },
+      "claude-opus-5-5": {
+        "supportsImages": true
+      },
       "claude-sonnet-4": {
         "supportsImages": true
       },
@@ -20056,6 +21034,9 @@ var init_pricing_data = __esm({
         "supportsImages": false
       },
       "grok-4.6": {
+        "supportsImages": false
+      },
+      "grok-4.7": {
         "supportsImages": false
       },
       "kimi-k2.7-code": {
@@ -20277,6 +21258,8 @@ function formatCursorCacheDiagnostics(counters, current, prior, stats) {
   }
   const continuity = stats.startedWithCheckpoint ? prior ? "warm" : "checkpoint-without-token-details" : "cold";
   const contextDelta = current && prior ? current.usedTokens - prior.usedTokens : void 0;
+  const toolsDelta = categoryDelta.tools;
+  const toolsCategoryChurn = stats.requestContextReused && typeof toolsDelta === "number" && toolsDelta !== 0 ? "upstream-stable-overlay" : !stats.requestContextReused && typeof toolsDelta === "number" && toolsDelta !== 0 ? "client-overlay-changed" : "none";
   return [
     "cache diagnosis:",
     `sessionKey=${stats.sessionKey ?? "-"}`,
@@ -20296,6 +21279,7 @@ function formatCursorCacheDiagnostics(counters, current, prior, stats) {
     `rawReadVsPriorContext=${prior ? usageRatio(rawRead, prior.usedTokens) : "n/a"}`,
     `sameSizedCategoryTokens=${categoriesComparable ? sameSizedCategoryTokens : "unavailable"}`,
     `categoryDelta=${categoriesComparable && Object.keys(categoryDelta).length > 0 ? JSON.stringify(categoryDelta) : "unavailable"}`,
+    `toolsCategoryChurn=${toolsCategoryChurn}`,
     `requestContext=${stats.requestContextReused ? "reused" : "built"}`,
     `requestContextHash=${stats.requestContextHash.slice(0, 16)}`,
     `systemPromptHash=${stats.systemPromptHash?.slice(0, 16) ?? "none"}`,
@@ -20306,6 +21290,8 @@ function formatCursorCacheDiagnostics(counters, current, prior, stats) {
     `steps=${stats.stepStarts}/${stats.stepCompletes}`,
     `displayToolCalls=${stats.displayToolCalls}`,
     `execRequests=${stats.execRequests}`,
+    `createPlanInTurn=${stats.createPlanInTurn === true}`,
+    `switchModeInTurn=${stats.switchModeInTurn === true}`,
     "perModelCallCache=unavailable"
   ].join(" ");
 }
@@ -20365,17 +21351,21 @@ function emptyLanguageModelV3Usage() {
     reasoningTokens: 0
   });
 }
+function occupancyValidationCounters(details, prior) {
+  const used = Math.max(0, Math.trunc(details.usedTokens));
+  return {
+    inputTokens: used,
+    outputTokens: used > 0 ? 1 : 0,
+    cacheRead: Math.max(0, Math.trunc(prior?.usedTokens ?? 0)),
+    cacheWrite: 0,
+    reasoningTokens: 0
+  };
+}
 function occupancyUsageFromTokenDetails(details, prior) {
   const used = Math.max(0, Math.trunc(details.usedTokens));
   if (used <= 0)
     return emptyLanguageModelV3Usage();
-  return buildLanguageModelV3UsageFromCounters({
-    inputTokens: used,
-    outputTokens: 1,
-    cacheRead: prior?.usedTokens ?? 0,
-    cacheWrite: 0,
-    reasoningTokens: 0
-  }, {
+  return buildLanguageModelV3UsageFromCounters(occupancyValidationCounters(details, prior), {
     contextTotalTokens: used,
     priorContextTokens: prior?.usedTokens
   });
@@ -20647,10 +21637,14 @@ var init_auth = __esm({
 
 // node_modules/cursor-opencode-provider/dist/language-model.js
 import fs7 from "node:fs";
-import path21 from "node:path";
-import { createHash as createHash6 } from "node:crypto";
-function checkpointBlobGraphRequiresRebase(stats, maxBytes = MAX_CHECKPOINT_BLOB_GRAPH_BYTES) {
-  return !stats.complete || stats.bytes > maxBytes;
+import path22 from "node:path";
+import { createHash as createHash7 } from "node:crypto";
+function checkpointBlobGraphConcern(stats, maxBytes = MAX_CHECKPOINT_BLOB_GRAPH_BYTES) {
+  if (!stats.complete)
+    return "incomplete-checkpoint-graph";
+  if (stats.bytes > maxBytes)
+    return "oversized-checkpoint-graph";
+  return void 0;
 }
 function responseRequiredChannel(payload) {
   const fields = readAllFieldsStrict(payload);
@@ -20940,9 +21934,6 @@ function rememberPromptIdentity(sessionKey, value) {
     promptIdentityBySession.delete(oldest);
   }
 }
-function promptIdentityChanged(previous, current) {
-  return current.hostAgent !== void 0 && previous.hostAgent !== current.hostAgent || current.systemPromptHash !== void 0 && previous.systemPromptHash !== current.systemPromptHash;
-}
 function sentHistoryImageHashes(sessionKey) {
   if (!sessionKey)
     return void 0;
@@ -21020,7 +22011,8 @@ async function doStreamImpl(modelId, options, callOptions) {
     session = deliverContinuationResults(session, trailingToolResults);
   }
   if (!session) {
-    if (trailingToolResults.length > 0) {
+    const sessionKey = opencodeSessionKey(callOptions);
+    if (!session && trailingToolResults.length > 0) {
       const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",");
       trace(`continuation: ${trailingToolResults.length} interrupted trailing tool result(s) [${ids}] \u2014 rebasing fresh Run`);
       session = await openSession({ recovery: { kind: "rebase" } });
@@ -21028,6 +22020,11 @@ async function doStreamImpl(modelId, options, callOptions) {
       const historical = extractToolResults(prompt).length;
       if (historical > 0) {
         trace(`fresh turn: ignoring ${historical} historical tool result(s) (not trailing)`);
+      }
+      try {
+        await preparePriorSessionForFreshTurn(sessionKey);
+      } catch (error) {
+        trace(`fresh turn: prepare-prior failed \u2014 opening the new Run and leaving any still-pending prior held \u2014 ${error.message}`);
       }
       session = await openSession();
     }
@@ -21246,15 +22243,18 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   let resumeRecovery = recovery?.kind === "resume" ? recovery : void 0;
   let resuming = !!resumeRecovery;
   const lifecycle = !allowTools && !isCompaction && !recovery;
-  const workspaceRoot = path21.resolve(getSessionDirectory(sessionKey) ?? (options.workspaceRoot || process.cwd()));
+  const workspaceRoot = resolveSessionWorkspaceRoot({
+    sessionKey,
+    headers: callOptions.headers,
+    workspaceRoot: options.workspaceRoot
+  });
   const baseSystemPrompt = extractSystemPrompt(prompt);
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot);
-  const stableSystemPrompt = [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n");
-  const stableSystemPromptHash = stableSystemPrompt ? createHash6("sha256").update(stableSystemPrompt).digest("hex") : void 0;
+  let frozenSystemPromptHash;
   const resetState = resolveTurnConversationReset({
     sessionKey,
     isCompaction,
-    ...lifecycle ? {} : { promptIdentity: { hostAgent, systemPromptHash: stableSystemPromptHash } }
+    historyRewrite: providerOptions?.[CURSOR_HISTORY_REWRITE_OPTION] === true
   });
   let bound = resuming ? { conversationId: resumeRecovery.conversationId, reset: false, previousId: void 0 } : bindConversationId(sessionKey, {
     reset: resetState.reset || recovery?.kind === "rebase",
@@ -21262,22 +22262,12 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   });
   let conversationState = lifecycle ? void 0 : resuming ? resumeRecovery.checkpoint : bound.reset ? void 0 : getCheckpoint(bound.conversationId);
   let checkpointGraph = conversationState ? inspectConversationBlobGraph(bound.conversationId, conversationState) : { count: 0, bytes: 0, complete: true };
-  let forcedResetReason;
-  if (conversationState && checkpointBlobGraphRequiresRebase(checkpointGraph)) {
-    const previousConversationId = bound.conversationId;
-    forcedResetReason = checkpointGraph.complete ? "oversized-checkpoint-graph" : "incomplete-checkpoint-graph";
-    trace(`checkpoint state rejected: reason=${forcedResetReason} conversationId=${previousConversationId} checkpointBytes=${conversationState.length} blobCount=${checkpointGraph.count} blobBytes=${checkpointGraph.bytes} limitBytes=${MAX_CHECKPOINT_BLOB_GRAPH_BYTES} detail=${checkpointGraph.fallbackReason ?? "-"} action=rebase`);
-    if (recovery?.kind === "resume")
-      recovery = { kind: "rebase" };
-    resumeRecovery = void 0;
-    resuming = false;
-    if (!sessionKey) {
-      clearCheckpoint(previousConversationId);
-      clearConversationBlobs(previousConversationId);
+  const forcedResetReason = void 0;
+  if (conversationState) {
+    const concern = checkpointBlobGraphConcern(checkpointGraph);
+    if (concern) {
+      trace(`checkpoint state warning: reason=${concern} conversationId=${bound.conversationId} checkpointBytes=${conversationState.length} blobCount=${checkpointGraph.count} blobBytes=${checkpointGraph.bytes} limitBytes=${MAX_CHECKPOINT_BLOB_GRAPH_BYTES} detail=${checkpointGraph.fallbackReason ?? "-"} action=warm-reuse`);
     }
-    bound = bindConversationId(sessionKey, { reset: true });
-    conversationState = void 0;
-    checkpointGraph = { count: 0, bytes: 0, complete: true };
   }
   const conversationId = bound.conversationId;
   const conversationGroupId = resolveConversationGroupId(sessionKey, conversationId);
@@ -21297,16 +22287,41 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   }
   const activeMode = getActiveCursorMode(sessionKey);
   const nativePlanPromptOwnsMode = hostAgent === "plan" && (activeMode === "plan" || activeMode === "spec");
-  const modeReminder = isCompaction || startedWithCheckpoint || lifecycle || nativePlanPromptOwnsMode ? void 0 : takeActiveCursorModeReminder(sessionKey, {
+  const modeReminder = isCompaction || lifecycle || nativePlanPromptOwnsMode ? void 0 : takeActiveCursorModeReminder(sessionKey, {
     advertisedTools: cursorTools.map((tool) => tool.name)
   });
-  const kickoffWarning = isCompaction || startedWithCheckpoint || lifecycle ? void 0 : takePlanExecutionKickoffWarning(sessionKey);
-  const systemPrompt = [
-    baseSystemPrompt,
-    interactionGuidance,
+  const kickoffWarning = isCompaction || lifecycle ? void 0 : takePlanExecutionKickoffWarning(sessionKey);
+  const oneShotReminders = [
     modeReminder,
     kickoffWarning ? `<system_reminder>${kickoffWarning}</system_reminder>` : void 0
-  ].filter(Boolean).join("\n\n");
+  ].filter((part) => !!part);
+  let systemPrompt;
+  if (isCompaction || lifecycle) {
+    systemPrompt = startedWithCheckpoint ? void 0 : [baseSystemPrompt, interactionGuidance, ...oneShotReminders].filter(Boolean).join("\n\n");
+    if (startedWithCheckpoint && oneShotReminders.length) {
+      userText = appendMidConversationMessage(userText, oneShotReminders.join("\n\n"));
+    }
+  } else {
+    const admitted = admitContextEpoch({
+      conversationId,
+      hasCheckpoint: startedWithCheckpoint,
+      hostSystem: baseSystemPrompt,
+      guidance: interactionGuidance,
+      hostAgent,
+      workspaceRoot,
+      oneShotReminders
+    });
+    systemPrompt = startedWithCheckpoint ? void 0 : admitted.seedSystemPrompt;
+    userText = appendMidConversationMessage(userText, admitted.midConversationMessage);
+    const previousIdentity = sessionKey ? promptIdentityBySession.get(sessionKey) : void 0;
+    frozenSystemPromptHash = admitted.epoch.baselineHash.trim() || previousIdentity?.systemPromptHash;
+    if (sessionKey) {
+      rememberPromptIdentity(sessionKey, {
+        hostAgent: hostAgent || previousIdentity?.hostAgent,
+        systemPromptHash: frozenSystemPromptHash
+      });
+    }
+  }
   const history = extractPromptHistory(prompt, {
     preserveTrailingUser: recovery?.kind === "rebase",
     toolResults: isCompaction ? "all" : recovery?.kind === "rebase" ? "trailing" : "omit"
@@ -21379,7 +22394,7 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     requestContext,
     action: resuming ? "resume" : "user"
   });
-  const sha = (b) => createHash6("sha256").update(b).digest("hex");
+  const sha2 = (b) => createHash7("sha256").update(b).digest("hex");
   const skillsCount = Array.isArray(requestContext.agent_skills) ? requestContext.agent_skills.length : 0;
   const hooksCtx = typeof requestContext.hooks_additional_context === "string" ? requestContext.hooks_additional_context : "";
   const historyChars = history.reduce((n, m) => n + m.content.length, 0);
@@ -21389,8 +22404,8 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   const runRequestWireEstimateIn = estimateTokens(reqBytes.length);
   const encodedRequestContext = encodeMessage("RequestContext", requestContext);
   const priorTokenDetails = decodeConversationTokenDetails(conversationState);
-  const requestContextHash = sha(encodedRequestContext);
-  const systemPromptHash = systemPrompt ? sha(systemPrompt) : void 0;
+  const requestContextHash = sha2(encodedRequestContext);
+  const systemPromptHash = systemPrompt ? sha2(systemPrompt) : void 0;
   const usageEstimate = {
     // This is used only before Cursor supplies authoritative TurnEnded usage.
     // Estimate the actual protobuf request, not history/system text omitted by
@@ -21405,12 +22420,12 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
   trace(`outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} conversationGroupId=${conversationGroupId} params=${JSON.stringify(parameterValues ?? [])} maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} images=${images.length} imageBytes=${images.reduce((total, image) => total + image.data.length, 0)} historyMsgs=${history.length} historyChars=${historyChars} checkpointLen=${conversationState?.length ?? 0} checkpointBlobCount=${checkpointGraph.count} checkpointBlobBytes=${checkpointGraph.bytes} checkpointGraphComplete=${checkpointGraph.complete} seedChars=${seedChars} seedEstimateIn=${seedEstimateIn} checkpointEnvelopeEstimateIn=${checkpointEnvelopeEstimateIn} reset=${bound.reset} resume=${resuming} requestContextReused=${requestContextReused} usageEstimateMode=run-request-wire usageEstimateIn=${usageEstimate.inputTokens} runRequestBytes=${reqBytes.length} requestContextBytes=${encodedRequestContext.length}`);
   if (hooksCtx)
     trace(`outbound Run hooks_additional_context: ${hooksCtx}`);
-  trace(`hash run_request sha256=${sha(reqBytes)}`);
+  trace(`hash run_request sha256=${sha2(reqBytes)}`);
   if (systemPrompt)
-    trace(`hash systemPrompt sha256=${sha(systemPrompt)}`);
+    trace(`hash systemPrompt sha256=${sha2(systemPrompt)}`);
   trace(`hash requestContext sha256=${requestContextHash}`);
   if (conversationState)
-    trace(`hash checkpoint sha256=${sha(conversationState)}`);
+    trace(`hash checkpoint sha256=${sha2(conversationState)}`);
   try {
     await writeWithBackpressure(stream, reqBytes, "initial Run request");
     rememberSentHistoryImageHashes(sessionKey, imageExtraction.hashes);
@@ -21418,7 +22433,7 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     stream.destroy();
     throw error;
   }
-  const hostToolDialect = hostToolDialectFromTools(tools);
+  const hostToolDialect = hostToolDialectFromTools(tools, options.defaultDialect);
   trace(`host tool dialect: filePathKey=${hostToolDialect.filePathKey} shellTool=${hostToolDialect.shellTool} tools=[${tools.map((t) => t.name).join(",")}]`);
   const session = {
     sessionId: crypto.randomUUID(),
@@ -21443,11 +22458,13 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
       stepStarts: 0,
       stepCompletes: 0,
       displayToolCalls: 0,
-      execRequests: 0
+      execRequests: 0,
+      createPlanInTurn: false,
+      switchModeInTurn: false
     },
     openCodeSessionId: lifecycle ? void 0 : sessionKey,
     hostAgent,
-    stableSystemPromptHash,
+    stableSystemPromptHash: frozenSystemPromptHash,
     postCompactionRebase: isCompaction,
     toolCatalog: snapshotToolCatalog(sessionKey),
     stream,
@@ -21467,6 +22484,7 @@ async function startSession(modelId, token, callOptions, options, startOptions) 
     subagentCatalog,
     requestContext,
     allowTools,
+    permittedToolNames: new Set(allowTools ? incomingTools.map((tool) => tool.name).filter((name14) => !!name14) : []),
     usageEstimate,
     pumpActive: false,
     pumpOwner: null,
@@ -21552,6 +22570,243 @@ function findContinuationSession(toolResults) {
       return s;
   }
   return void 0;
+}
+async function preparePriorSessionForFreshTurn(openCodeSessionId, opts) {
+  const prior = sessionManager.findOpenByOpenCodeSessionId(openCodeSessionId);
+  if (!prior)
+    return "none";
+  const settledBridged = sessionManager.settleBridgedPending(prior);
+  if (settledBridged > 0) {
+    trace(`fresh turn: settled ${settledBridged} bridged pending on prior session ${prior.sessionId} remainingPending=${prior.pending.size}`);
+  }
+  if (sessionManager.isActivelyPumping(prior)) {
+    const waited = await waitUntilNotPumping(prior, {
+      timeoutMs: opts?.timeoutMs ?? FRESH_TURN_DRAIN_TIMEOUT_MS
+    });
+    if (!waited) {
+      trace(`fresh turn: prior session ${prior.sessionId} is still pumping after wait \u2014 leaving that Run held; registerSession will not close it`);
+      return "busy";
+    }
+  }
+  if (prior.closed)
+    return "none";
+  const cancelled = cancelPendingExecsForFreshTurn(prior);
+  if (cancelled > 0) {
+    trace(`fresh turn: cancelled ${cancelled} pending exec(s) on prior session ${prior.sessionId} remainingPending=${prior.pending.size}`);
+  }
+  if (prior.closed) {
+    return cancelled > 0 || settledBridged > 0 ? "settled-only" : "none";
+  }
+  if (prior.pending.size > 0) {
+    trace(`fresh turn: prior session ${prior.sessionId} still has ${prior.pending.size} pending after cancel \u2014 leaving that Run held; registerSession will not close it`);
+    return "busy";
+  }
+  const outcome = await drainSessionUntilTurnEnded(prior, {
+    timeoutMs: opts?.timeoutMs ?? FRESH_TURN_DRAIN_TIMEOUT_MS
+  });
+  trace(`fresh turn: prior session ${prior.sessionId} drain outcome=${outcome}`);
+  if (outcome === "turn-ended")
+    return "drained";
+  if (cancelled > 0 || settledBridged > 0)
+    return "settled-only";
+  return outcome === "timeout" || outcome === "interrupted" ? "settled-only" : "busy";
+}
+function cancelPendingExecsForFreshTurn(session) {
+  if (session.closed || session.pending.size === 0)
+    return 0;
+  const synthetic = [];
+  for (const [execId, pending4] of session.pending.entries()) {
+    if (pending4.bridged)
+      continue;
+    if (pending4.state !== "pending")
+      continue;
+    synthetic.push({
+      toolCallId: `cursor_${session.sessionId}_${execId}`,
+      sessionId: session.sessionId,
+      execId,
+      toolName: pending4.toolName ?? "unknown",
+      output: FRESH_TURN_PENDING_CANCEL_REASON,
+      error: FRESH_TURN_PENDING_CANCEL_REASON
+    });
+  }
+  if (synthetic.length === 0)
+    return 0;
+  const before = session.pending.size;
+  const delivered = deliverContinuationResults(session, synthetic);
+  if (!delivered || delivered.closed) {
+    return Math.max(0, before - session.pending.size);
+  }
+  return Math.max(0, before - session.pending.size);
+}
+async function waitUntilNotPumping(session, opts) {
+  if (!sessionManager.isActivelyPumping(session))
+    return true;
+  const deadlineAt = Date.now() + Math.max(1, opts.timeoutMs);
+  while (Date.now() < deadlineAt) {
+    if (session.closed)
+      return false;
+    if (!sessionManager.isActivelyPumping(session))
+      return true;
+    await new Promise((resolve2) => {
+      const timer = setTimeout(resolve2, 25);
+      timer.unref?.();
+    });
+  }
+  return !sessionManager.isActivelyPumping(session);
+}
+function nextFrameWithTimeout(frames, timeoutMs2) {
+  return new Promise((resolve2, reject) => {
+    let settled = false;
+    const finish = (value, error) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      if (error !== void 0)
+        reject(error);
+      else
+        resolve2(value);
+    };
+    const timer = setTimeout(() => finish({ done: true, timedOut: true }), timeoutMs2);
+    timer.unref?.();
+    void frames.next().then((value) => finish(value), (error) => finish(void 0, error));
+  });
+}
+async function drainSessionUntilTurnEnded(session, opts) {
+  if (session.closed)
+    return "skipped";
+  if (session.pending.size > 0 || sessionManager.isActivelyPumping(session))
+    return "busy";
+  const timeoutMs2 = Math.max(1, opts?.timeoutMs ?? FRESH_TURN_DRAIN_TIMEOUT_MS);
+  const owner = /* @__PURE__ */ Symbol(`fresh-turn-drain:${session.sessionId}`);
+  sessionManager.beginPump(session, owner);
+  const deadlineAt = Date.now() + timeoutMs2;
+  let outcome = "timeout";
+  try {
+    while (Date.now() < deadlineAt) {
+      if (session.closed) {
+        outcome = "interrupted";
+        break;
+      }
+      const remainingMs = Math.max(1, deadlineAt - Date.now());
+      let next;
+      try {
+        next = await nextFrameWithTimeout(session.frames, remainingMs);
+      } catch (error) {
+        trace(`fresh turn drain: frame wait failed sessionId=${session.sessionId} err=${error.message}`);
+        outcome = "interrupted";
+        break;
+      }
+      if ("timedOut" in next && next.timedOut) {
+        outcome = "timeout";
+        break;
+      }
+      if (next.done) {
+        outcome = "interrupted";
+        break;
+      }
+      const frame = next.value;
+      if (frame.flags & 2) {
+        outcome = "interrupted";
+        break;
+      }
+      let payload;
+      try {
+        payload = decodeFramePayload(frame);
+      } catch {
+        continue;
+      }
+      let asm;
+      try {
+        asm = decodeMessage("AgentServerMessage", payload);
+      } catch {
+        continue;
+      }
+      const iu = asm.interaction_update;
+      const kv = asm.kv_server_message;
+      const esm = asm.exec_server_message;
+      const interactionQuery = asm.interaction_query;
+      const checkpointRaw = asm.conversation_checkpoint_update;
+      const requiredChannel = responseRequiredChannel(payload);
+      if (checkpointRaw != null) {
+        const bytes = normalizeCheckpointBytes(checkpointRaw);
+        if (bytes && bytes.length > 0) {
+          if (session.cacheDiagnostics)
+            session.cacheDiagnostics.checkpointUpdates++;
+          setCheckpoint(session.conversationId, bytes);
+          session.resumeCheckpoint = Uint8Array.from(bytes);
+          const tokenDetails = decodeConversationTokenDetails(bytes);
+          if (tokenDetails) {
+            if (session.cacheDiagnostics)
+              session.cacheDiagnostics.tokenDetailUpdates++;
+            session.tokenDetails = tokenDetails;
+            session.tokenDetailsFresh = true;
+          }
+        }
+      }
+      if (iu?.turn_ended) {
+        trace(`fresh turn drain: turn_ended raw wire fields: ${debugWalkTurnEnded(payload)}`);
+        if (session.openCodeSessionId) {
+          await persistConversationState(session.cacheDir ?? opencodeGlobalCacheDir(), {
+            sessionKey: session.openCodeSessionId,
+            conversationId: session.conversationId,
+            requestContext: session.requestContext,
+            toolCatalog: session.toolCatalog ?? [],
+            postCompactionRebase: session.postCompactionRebase,
+            hostAgent: session.hostAgent,
+            systemPromptHash: session.stableSystemPromptHash
+          }).catch((error) => {
+            trace(`fresh turn drain: TurnEnded save failed sessionKey=${session.openCodeSessionId}: ${String(error)}`);
+          });
+        }
+        const turnEnded = iu.turn_ended;
+        const counters = cursorUsageCountersFromTurnEnded(turnEnded);
+        if (session.cacheDiagnostics) {
+          trace(formatCursorCacheDiagnostics(counters, session.tokenDetails, session.cacheDiagnostics.priorTokenDetails, {
+            ...session.cacheDiagnostics,
+            conversationGroupId: session.cacheDiagnostics.conversationGroupId ?? resolveConversationGroupId(session.openCodeSessionId, session.conversationId),
+            modelId: session.cacheDiagnostics.modelId
+          }));
+        } else {
+          trace(`fresh turn drain: turn_ended input=${counters.inputTokens} cacheRead=${counters.cacheRead} output=${counters.outputTokens}`);
+        }
+        sessionManager.close(session, "turn-ended");
+        outcome = "turn-ended";
+        break;
+      }
+      if (kv) {
+        const handled = handleKvServerMessage(kv, session);
+        if (!handled) {
+          outcome = "busy";
+          break;
+        }
+        try {
+          await writeWithBackpressure(session.stream, handled.reply, `fresh-turn-drain KV ${handled.kind}_blob reply id=${handled.id}`);
+        } catch (error) {
+          trace(`fresh turn drain: KV reply failed sessionId=${session.sessionId} err=${error.message}`);
+          outcome = "interrupted";
+          break;
+        }
+        sessionManager.recordSemanticProgress(session);
+        continue;
+      }
+      if (iu?.text_delta || iu?.thinking_delta || iu?.heartbeat || iu?.partial_tool_call || iu?.step_started || iu?.step_completed) {
+        sessionManager.recordSemanticProgress(session);
+        continue;
+      }
+      if (iu?.tool_call_started || iu?.tool_call_completed) {
+        outcome = "busy";
+        break;
+      }
+      if (esm || interactionQuery || requiredChannel === "exec" || requiredChannel === "interaction") {
+        outcome = "busy";
+        break;
+      }
+    }
+  } finally {
+    sessionManager.endPump(session, owner);
+  }
+  return outcome;
 }
 function buildAskQuestionContinuationFrame(pending4, result) {
   const metadata = pending4.resultMetadata ?? {};
@@ -21688,8 +22943,8 @@ function deliverContinuationResults(session, trailingToolResults) {
         const requestedPath = pending4.resultMetadata?.path;
         const correlatedEdit = !r.error && pending4.resultField === "read_result" && pending4.toolName === "read" && typeof correlatedEditCallId === "string" && typeof requestedPath === "string" ? session.editToolCalls?.get(correlatedEditCallId) : void 0;
         if (correlatedEdit) {
-          const absolutePath = path21.resolve(workspaceRoot, requestedPath);
-          if (absolutePath === path21.resolve(workspaceRoot, correlatedEdit.path)) {
+          const absolutePath = path22.resolve(workspaceRoot, requestedPath);
+          if (absolutePath === path22.resolve(workspaceRoot, correlatedEdit.path)) {
             frames = buildCompleteEditReadMessages(r.execId, absolutePath, requestedPath) ?? [];
             if (frames.length > 0) {
               correlatedEdit.completeRead = true;
@@ -21705,7 +22960,7 @@ function deliverContinuationResults(session, trailingToolResults) {
               write_result: {
                 permission_denied: {
                   path: deniedPath,
-                  directory: deniedPath ? path21.dirname(deniedPath) : "",
+                  directory: deniedPath ? path22.dirname(deniedPath) : "",
                   operation: "write",
                   error: r.error.replace(`${IMAGE_PERMISSION_DENIED_PREFIX} `, ""),
                   is_readonly: false
@@ -21909,7 +23164,9 @@ async function pump(session, controller, ids, abortSignal) {
     stepStarts: 0,
     stepCompletes: 0,
     displayToolCalls: 0,
-    execRequests: 0
+    execRequests: 0,
+    createPlanInTurn: false,
+    switchModeInTurn: false
   };
   cacheDiagnostics.pumpPasses++;
   const { textId, reasoningId } = ids;
@@ -21998,7 +23255,7 @@ async function pump(session, controller, ids, abortSignal) {
     if (!requestedPath || !editPath)
       return false;
     const workspaceRoot = workspaceRootFromRequestContext(session.requestContext);
-    const resolvePath = (value) => path21.resolve(workspaceRoot, value);
+    const resolvePath = (value) => path22.resolve(workspaceRoot, value);
     const absolutePath = resolvePath(requestedPath);
     if (absolutePath !== resolvePath(editPath))
       return false;
@@ -22015,8 +23272,8 @@ async function pump(session, controller, ids, abortSignal) {
       try {
         const realRoot2 = fs7.realpathSync(workspaceRoot);
         const realTarget = fs7.realpathSync(absolutePath);
-        const relative = path21.relative(realRoot2, realTarget);
-        if (relative.startsWith(`..${path21.sep}`) || path21.isAbsolute(relative)) {
+        const relative = path22.relative(realRoot2, realTarget);
+        if (relative.startsWith(`..${path22.sep}`) || path22.isAbsolute(relative)) {
           parsed.resultMetadata = {
             ...parsed.resultMetadata,
             correlatedEditCallId: displayCallId
@@ -22130,37 +23387,38 @@ async function pump(session, controller, ids, abortSignal) {
     closeOpenSpans();
     const est = session.usageEstimate;
     const tokenDetails = session.tokenDetails;
-    const occupancyDetails = !te && tokenDetails && tokenDetails.usedTokens > 0 ? tokenDetails : void 0;
+    const occupancyDetails = tokenDetails && tokenDetails.usedTokens > 0 ? tokenDetails : void 0;
     const contextSource = tokenDetails ? session.tokenDetailsFresh ? "checkpoint-current-run" : "checkpoint-previous-turn" : void 0;
+    const usage = settledUsage ?? (occupancyDetails ? occupancyUsageFromTokenDetails(occupancyDetails, session.cacheDiagnostics?.priorTokenDetails) : emptyLanguageModelV3Usage());
     const counters = te ? cursorUsageCountersFromTurnEnded(te) : void 0;
-    const usage = settledUsage ?? (te ? tokenDetails ? buildLanguageModelV3UsageFromCounters(counters, {
-      contextTotalTokens: tokenDetails.usedTokens,
-      priorContextTokens: session.cacheDiagnostics?.priorTokenDetails?.usedTokens
-    }) : emptyLanguageModelV3Usage() : occupancyDetails ? occupancyUsageFromTokenDetails(occupancyDetails, session.cacheDiagnostics?.priorTokenDetails) : emptyLanguageModelV3Usage());
-    const providerMetadata = te ? cursorTurnEndedProviderMetadata(te, tokenDetails, contextSource) : occupancyDetails && contextSource ? {
+    const providerMetadata = te ? {
+      ...OPENCODE_DISPLAY_ONLY_COST_METADATA,
+      ...cursorTurnEndedProviderMetadata(te, tokenDetails, contextSource)
+    } : {
       ...OPENCODE_DISPLAY_ONLY_COST_METADATA,
       cursor: {
         usageVersion: 3,
         occupancyOnly: true,
-        context: cursorContextUsageMetadata(occupancyDetails, contextSource)
+        ...occupancyDetails && contextSource ? { context: cursorContextUsageMetadata(occupancyDetails, contextSource) } : {}
       }
-    } : void 0;
+    };
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason ? String(reason.unified ?? "unknown") : String(reason);
     const inTotal = usage.inputTokens?.total ?? 0;
     const outTotal = usage.outputTokens?.total ?? 0;
     const occupancySource = occupancyDetails ? `occupancy-${contextSource ?? "unavailable"}` : "intermediate-zero";
-    trace(`finish: reason=${reasonLabel} v3In=${inTotal} v3Out=${outTotal} v3CacheRead=${usage.inputTokens?.cacheRead ?? 0} v3CacheWrite=${usage.inputTokens?.cacheWrite ?? 0} v3Reasoning=${usage.outputTokens?.reasoning ?? 0} rawIn=${te ? turnEndedCounter(te, "input_tokens") : est.inputTokens} rawOut=${te ? turnEndedCounter(te, "output_tokens") : est.outputTokens} rawCacheRead=${te ? turnEndedCounter(te, "cache_read") : est.cacheRead} rawCacheWrite=${te ? turnEndedCounter(te, "cache_write") : est.cacheWrite} source=${te ? settledSource ?? (contextSource ?? "unavailable") : occupancySource}`);
-    if (counters) {
+    const occupancyPrefixCache = occupancyDetails ? session.cacheDiagnostics?.priorTokenDetails?.usedTokens ?? 0 : void 0;
+    const rawIn = te ? turnEndedCounter(te, "input_tokens") : occupancyDetails ? occupancyDetails.usedTokens : est.inputTokens;
+    const rawOut = te ? turnEndedCounter(te, "output_tokens") : occupancyDetails ? 1 : est.outputTokens;
+    const rawCacheRead = te ? turnEndedCounter(te, "cache_read") : occupancyPrefixCache ?? est.cacheRead;
+    const rawCacheWrite = te ? turnEndedCounter(te, "cache_write") : est.cacheWrite;
+    trace(`finish: reason=${reasonLabel} v3In=${inTotal} v3Out=${outTotal} v3CacheRead=${usage.inputTokens?.cacheRead ?? 0} v3CacheWrite=${usage.inputTokens?.cacheWrite ?? 0} v3Reasoning=${usage.outputTokens?.reasoning ?? 0} rawIn=${rawIn} rawOut=${rawOut} rawCacheRead=${rawCacheRead} rawCacheWrite=${rawCacheWrite} ${occupancyPrefixCache !== void 0 ? `occupancyPrefixCache=${occupancyPrefixCache} ` : ""}source=${te ? settledSource ?? (contextSource ?? "unavailable") : occupancySource}`);
+    if (occupancyDetails) {
+      trace(formatTurnUsageValidation(occupancyValidationCounters(occupancyDetails, session.cacheDiagnostics?.priorTokenDetails), usage, occupancyDetails, contextSource));
+    } else if (counters) {
       trace(formatTurnUsageValidation(counters, usage, tokenDetails, contextSource));
+    }
+    if (counters) {
       trace(formatCursorCacheDiagnostics(counters, tokenDetails, cacheDiagnostics.priorTokenDetails, cacheDiagnostics));
-    } else if (occupancyDetails) {
-      trace(formatTurnUsageValidation({
-        inputTokens: occupancyDetails.usedTokens,
-        outputTokens: 1,
-        cacheRead: session.cacheDiagnostics?.priorTokenDetails?.usedTokens ?? 0,
-        cacheWrite: 0,
-        reasoningTokens: 0
-      }, usage, occupancyDetails, contextSource));
     }
     safeEnqueue({
       type: "finish",
@@ -22358,14 +23616,18 @@ async function pump(session, controller, ids, abortSignal) {
           } else {
             const display = parseDisplayToolCall(callId, toolCall, session.mirroredTodos);
             const advertised = advertisedToolNamesFromDescriptors(session.toolDescriptors);
-            const bridged = display ? resolveBridgedOpenCodeToolCall(display, advertised) : void 0;
+            const bridged = display ? resolveBridgedOpenCodeToolCall(display, advertised, session.hostToolDialect) : void 0;
             if (!display) {
               const callIdLog = callId.replace(/\r?\n/g, "\\n");
               const toolBytes = extractProtobufSubmessage(payload, [1, 3, 2]);
               const wire = toolBytes ? ` wireFields=[${listProtobufFieldNumbers(toolBytes).join(",")}]` : "";
               trace(`display tool_call_completed: unparsed callId=${callIdLog} keys=[${Object.keys(toolCall).join(",")}]${wire}`);
             } else if (!bridged) {
-              trace(`display tool_call_completed: no advertised OpenCode tool callId=${callId} variant=${display.variant} preferred=${display.preferredToolName} advertised=[${advertised.join(",")}]`);
+              if (isNativeDisplayToolCall(display.variant)) {
+                trace(`display tool_call_completed: native ${display.preferredToolName} callId=${callId} (server-side catalog; spill uses write_args)`);
+              } else {
+                trace(`display tool_call_completed: no advertised OpenCode tool callId=${callId} variant=${display.variant} preferred=${display.preferredToolName} advertised=[${advertised.join(",")}]`);
+              }
             } else {
               if (bridged.toolName === "todowrite" && bridged.variant === "update_todos_tool_call") {
                 const snapshot = snapshotMirroredTodos(bridged.args.todos);
@@ -22567,6 +23829,15 @@ async function pump(session, controller, ids, abortSignal) {
                 return;
               continue;
             }
+            const permittedToolNames = session.permittedToolNames;
+            if (permittedToolNames && permittedToolNames.size > 0 && !permittedToolNames.has(parsed.toolName)) {
+              const permitted = [...permittedToolNames].sort().join(", ");
+              const reason = `OpenCode tool '${parsed.toolName}' is not permitted for the current agent this turn. Permitted tools: ${permitted || "none"}. Continue using only permitted tools; do not retry '${parsed.toolName}'.`;
+              trace(`exec: not permitted this turn toolName=${parsed.toolName} permitted=[${[...permittedToolNames].sort().join(",")}]`);
+              if (!await rejectExec(parsed, reason, "not permitted this turn"))
+                return;
+              continue;
+            }
             if (recoverCorrelatedEditRead(parsed, displayCallId))
               continue;
             if (rejectMissingReadTarget(parsed)) {
@@ -22650,6 +23921,12 @@ async function pump(session, controller, ids, abortSignal) {
             await writeWithBackpressure(session.stream, handled.reply, `interaction reply id=${handled.id}`);
           }
           trace(`interaction_query: replied id=${handled.id} variant=${handled.variantName} field=${handled.variantField} outcome=${handled.outcome}` + (handled.reply ? "" : " (deferred to host tool result)"));
+          if (handled.createPlan && session.cacheDiagnostics) {
+            session.cacheDiagnostics.createPlanInTurn = true;
+          }
+          if (handled.switchMode && session.cacheDiagnostics) {
+            session.cacheDiagnostics.switchModeInTurn = true;
+          }
           if (handled.generateImage) {
             trace(`interaction_query: approved generate_image target=${JSON.stringify(handled.generateImage.filePath || "(unspecified)")} refs=${handled.generateImage.referenceImagePaths.length} cursorToolCallId=${handled.generateImage.toolCallId || "(none)"}`);
           }
@@ -22873,7 +24150,7 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   if (names.has("question")) {
     instructions.push("- When user input is required, call the OpenCode `question` tool. Cursor-native AskQuestion requests are also accepted and answered through it.");
   }
-  instructions.push("- Cursor-native CreatePlan is accepted as a Cursor interaction (not an OpenCode or MCP catalog tool). Raise it normally; the provider writes the plan under the host's calculated plans directory and handles execution approval. Do not narrate that CreatePlan is missing, unavailable, or not an MCP tool.");
+  instructions.push(names.has("cursor_plan_stage") ? "- Cursor-native CreatePlan is accepted as a Cursor interaction (not an OpenCode or MCP catalog tool). Raise it normally. The host stage tool waits for the host plan review and does not return until the user accepts or declines. Do not call `plan_exit` to submit or skip that review, and do not implement until that tool returns success. Do not narrate that CreatePlan is missing, unavailable, or not an MCP tool. When the task will need a user-approved plan, record the first version as soon as its shape is clear, then keep investigating: refining afterward is expected and follow-up plans cost nothing extra. Do not defer the first plan until investigation is complete." : "- Cursor-native CreatePlan is accepted as a Cursor interaction (not an OpenCode or MCP catalog tool). Raise it normally; the provider writes the plan under the host's calculated plans directory and handles execution approval. Do not narrate that CreatePlan is missing, unavailable, or not an MCP tool. When the task will need a user-approved plan, record the first version as soon as its shape is clear, then keep investigating: refining afterward is expected and follow-up plans cost nothing extra. Do not defer the first plan until investigation is complete.");
   if (names.has("plan_enter")) {
     instructions.push("- To enter plan mode, call the OpenCode `plan_enter` tool. Cursor-native SwitchMode requests for plan/spec are also accepted and answered through it.");
   }
@@ -22901,6 +24178,7 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
   if (names.has("execute")) {
     const shell = names.has("shell") ? "`shell`" : names.has("bash") ? "`bash`" : void 0;
     instructions.push(shell ? `- OpenCode \`execute\` is Code Mode JavaScript (\`code\`); it is not a shell. For OS commands, call OpenCode ${shell}. Do not pass \`command\` to \`execute\`.` : "- OpenCode `execute` is Code Mode JavaScript (`code`); it is not a shell. Do not pass `command` to `execute`.");
+    instructions.push("- Call tools named in the direct list by their own names, even when a server instruction says to reach them through `execute`. Use `execute` only for tools that appear in the host Code Mode catalog and are absent from that list. Use the exact paths and signatures from that catalog or its `search` function, and call `execute` with `{ code }`.");
   }
   if (names.has("task") || names.has("subagent")) {
     const target = names.has("task") ? "`task`" : "`subagent`";
@@ -22922,9 +24200,9 @@ function buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot) {
     instructions.push("- Never use a read result as complete file content when it says the output is capped, partial, or requires another offset. Read the remaining ranges first, or make a targeted edit/patch from complete context; do not pass a partial read back as a whole-file replacement.");
   }
   return [
-    `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name14) => `\`${name14}\``).join(", ")}.`,
+    `OpenCode exposes these direct tools for this turn: ${[...names].map((name14) => `\`${name14}\``).join(", ")}.`,
     `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
-    subagents.executor ? "Call only tools in that exact OpenCode list for ordinary host execution. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing." : "Call only tools in that exact OpenCode list for ordinary host execution. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing. Other unlisted Cursor-native tools are not bridged; complete the work with the listed tools or explain the limitation without claiming a missing MCP tool.",
+    subagents.executor ? "Call only tools in that direct OpenCode list for ordinary host execution. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing." : "Call only tools in that direct OpenCode list for ordinary host execution. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, \u2026) are not OpenCode/MCP catalog tools \u2014 raise them normally and do not narrate that they are missing. Other unlisted Cursor-native tools are not bridged; complete the work with the listed tools or explain the limitation without claiming a missing MCP tool.",
     ...instructions.length > 0 ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"] : [],
     ...instructions,
     "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
@@ -23060,10 +24338,11 @@ function extractTools(callOptions) {
   const out = [];
   for (const t of tools) {
     const any = t;
-    if (any.type === "function" || any.name && any.inputSchema !== void 0) {
+    const schema = any.inputSchema ?? any.parameters ?? any.schema;
+    if (any.type === "function" || any.name && schema !== void 0) {
       if (!any.name)
         continue;
-      out.push({ name: any.name, description: any.description, inputSchema: any.inputSchema });
+      out.push({ name: any.name, description: any.description, inputSchema: schema });
     }
   }
   trace(`extractTools: ${tools.length} incoming \u2192 ${out.length} advertised [${out.map((t) => t.name).join(",")}]`);
@@ -23078,22 +24357,45 @@ function spanEndParts(opts) {
   return out;
 }
 function toolsInFixedOrder(tools) {
-  return tools.map((tool) => ({ ...tool })).sort((left, right) => (left.name ?? "").localeCompare(right.name ?? ""));
+  return tools.map((tool) => ({ ...tool })).sort((left, right) => {
+    const a = left.name ?? "";
+    const b = right.name ?? "";
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
 }
 function computeAllowTools(toolCount, toolChoice2) {
   return toolCount > 0 && toolChoice2?.type !== "none";
 }
 async function resolveTurnToolState(input2) {
   const { sessionKey, incomingTools, isCompaction } = input2;
-  if (sessionKey && incomingTools.length > 0) {
-    rememberToolCatalog(sessionKey, toolsInFixedOrder(incomingTools));
-  }
   let advertisedTools;
   if (incomingTools.length > 0) {
-    advertisedTools = toolsInFixedOrder(incomingTools);
+    if (sessionKey) {
+      const cached = toolCatalogBySession.get(sessionKey);
+      if (cached && cached.length > 0) {
+        const cachedNames = new Set(cached.map((tool) => tool.name));
+        const incomingNames = new Set(incomingTools.map((tool) => tool.name));
+        const hasNew = [...incomingNames].some((name14) => !cachedNames.has(name14));
+        if (hasNew) {
+          const newcomers = toolsInFixedOrder(incomingTools.filter((tool) => !cachedNames.has(tool.name)));
+          const merged = [...cached, ...newcomers];
+          rememberToolCatalog(sessionKey, merged);
+          advertisedTools = merged;
+        } else {
+          rememberToolCatalog(sessionKey, cached);
+          advertisedTools = cached;
+        }
+      } else {
+        const initial = toolsInFixedOrder(incomingTools);
+        rememberToolCatalog(sessionKey, initial);
+        advertisedTools = initial;
+      }
+    } else {
+      advertisedTools = toolsInFixedOrder(incomingTools);
+    }
   } else if (sessionKey) {
     const cached = toolCatalogBySession.get(sessionKey) ?? await waitForSiblingToolCatalog(sessionKey, input2.abortSignal);
-    advertisedTools = toolsInFixedOrder(cached);
+    advertisedTools = cached;
   } else {
     advertisedTools = [];
   }
@@ -23109,23 +24411,21 @@ function resolveTurnConversationReset(input2) {
       rememberPostCompactionRebase(sessionKey);
     return { reset: true, reason: "compaction" };
   }
-  let promptChange;
+  if (input2.historyRewrite) {
+    if (sessionKey)
+      postCompactionRebaseBySession.delete(sessionKey);
+    return { reset: true, reason: "history-rewrite" };
+  }
   if (sessionKey && input2.promptIdentity) {
-    const current = normalizePromptIdentity(input2.promptIdentity);
     const previous = promptIdentityBySession.get(sessionKey);
-    if (previous && promptIdentityChanged(previous, current)) {
-      promptChange = current.hostAgent !== void 0 && previous.hostAgent !== current.hostAgent ? "agent-change" : "system-prompt-change";
-    }
     rememberPromptIdentity(sessionKey, {
       ...previous,
-      ...current
+      ...normalizePromptIdentity(input2.promptIdentity)
     });
   }
   if (sessionKey && postCompactionRebaseBySession.delete(sessionKey)) {
     return { reset: true, reason: "post-compaction-rebase" };
   }
-  if (promptChange)
-    return { reset: true, reason: promptChange };
   return { reset: false };
 }
 function extractUserText(lastUser) {
@@ -23186,7 +24486,7 @@ function foldStreamParts(parts) {
     ...providerMetadata ? { providerMetadata } : {}
   };
 }
-var _availableModels, _availableModelsMtimeMs, toolCatalogBySession, sentHistoryImageHashesBySession, postCompactionRebaseBySession, promptIdentityBySession, MAX_TURN_STATE_SESSIONS, MAX_SENT_HISTORY_IMAGES_PER_SESSION, DEFAULT_RETRY_POLICY, MAX_RETRY_ATTEMPTS, MAX_RETRY_DELAY_MS, RUN_REQUEST_DECODE_FAILED, RUN_REQUEST_UNSUPPORTED, RUN_REPLY_FAILED, MAX_CHECKPOINT_BLOB_GRAPH_BYTES, RESPONSE_REQUIRED_CHANNEL_BY_FIELD, toolCatalogWaitersBySession, mirroredTodosBySession, heartbeatWritePendingBySession, heartbeatGenerationBySession, streamWriteChains;
+var _availableModels, _availableModelsMtimeMs, toolCatalogBySession, sentHistoryImageHashesBySession, postCompactionRebaseBySession, promptIdentityBySession, MAX_TURN_STATE_SESSIONS, MAX_SENT_HISTORY_IMAGES_PER_SESSION, DEFAULT_RETRY_POLICY, MAX_RETRY_ATTEMPTS, MAX_RETRY_DELAY_MS, RUN_REQUEST_DECODE_FAILED, RUN_REQUEST_UNSUPPORTED, RUN_REPLY_FAILED, MAX_CHECKPOINT_BLOB_GRAPH_BYTES, RESPONSE_REQUIRED_CHANNEL_BY_FIELD, toolCatalogWaitersBySession, mirroredTodosBySession, heartbeatWritePendingBySession, heartbeatGenerationBySession, FRESH_TURN_DRAIN_TIMEOUT_MS, FRESH_TURN_PENDING_CANCEL_REASON, streamWriteChains;
 var init_language_model = __esm({
   "node_modules/cursor-opencode-provider/dist/language-model.js"() {
     init_connect();
@@ -23220,6 +24520,7 @@ var init_language_model = __esm({
     init_errors();
     init_models();
     init_frozen();
+    init_epoch();
     init_env();
     init_paths();
     init_agent_url();
@@ -23260,6 +24561,8 @@ var init_language_model = __esm({
     mirroredTodosBySession = /* @__PURE__ */ new Map();
     heartbeatWritePendingBySession = /* @__PURE__ */ new WeakMap();
     heartbeatGenerationBySession = /* @__PURE__ */ new WeakMap();
+    FRESH_TURN_DRAIN_TIMEOUT_MS = 8e3;
+    FRESH_TURN_PENDING_CANCEL_REASON = "Host started a new user turn before this tool result was delivered";
     streamWriteChains = /* @__PURE__ */ new WeakMap();
   }
 });
@@ -23433,7 +24736,8 @@ function modelInfoToConfig(mi, options = {}) {
   if (contextTier === "long")
     name14 += " 1M";
   const documentedContext = getDocumentedCursorModelContext(mi.id);
-  const context = contextTier === "long" ? mi.maxContextForMaxMode ?? documentedContext?.maxContextForMaxMode ?? 1e6 : mi.maxContext ?? documentedContext?.maxContext ?? 2e5;
+  const fallbackContext = mi.id === "default" ? 256e3 : 2e5;
+  const context = contextTier === "long" ? mi.maxContextForMaxMode ?? documentedContext?.maxContextForMaxMode ?? 1e6 : mi.maxContext ?? documentedContext?.maxContext ?? fallbackContext;
   const output = contextTier === "long" ? 128e3 : 32e3;
   const supportsImages = resolveCursorModelSupportsImages(mi.id, mi.supportsImages);
   const config = {
@@ -23551,7 +24855,7 @@ var init_model_config = __esm({
 
 // node_modules/cursor-opencode-provider/dist/context/auth-store.js
 import { readFile as readFile7 } from "node:fs/promises";
-import path22 from "node:path";
+import path23 from "node:path";
 function debugEnabled() {
   return process.env.CURSOR_PROVIDER_DEBUG === "1" || process.env.CURSOR_PROVIDER_DEBUG === "true";
 }
@@ -23570,7 +24874,7 @@ async function readStoredAuth(providerId) {
       return void 0;
     }
   }
-  const filePath = path22.join(hostGlobalDataDir(), "auth.json");
+  const filePath = path23.join(hostGlobalDataDir(), "auth.json");
   try {
     const raw = await readFile7(filePath, "utf-8");
     try {
@@ -23776,19 +25080,39 @@ var init_image_save_tool = __esm({
   }
 });
 
+// node_modules/cursor-opencode-provider/dist/host-event-bridge.js
+async function dispatchHostEventBridge(input2) {
+  const bridge = globalThis[HOST_EVENT_BRIDGE];
+  if (!bridge || typeof bridge !== "object")
+    return;
+  const handle = bridge.handle;
+  if (typeof handle !== "function")
+    return;
+  try {
+    await handle.call(bridge, input2);
+  } catch {
+  }
+}
+var HOST_EVENT_BRIDGE;
+var init_host_event_bridge = __esm({
+  "node_modules/cursor-opencode-provider/dist/host-event-bridge.js"() {
+    HOST_EVENT_BRIDGE = /* @__PURE__ */ Symbol.for("opencode.host.event-bridge");
+  }
+});
+
 // node_modules/cursor-opencode-provider/dist/plugin.js
-import path23 from "node:path";
+import path24 from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 async function loadClassicTools(options = {}) {
   const configDir = options.configDirs?.[0] ?? opencodeGlobalConfigDirs()[0];
   const candidates = [
-    ...configDir ? [path23.join(configDir, "node_modules", "@opencode-ai", "plugin", "dist", "index.js")] : [],
+    ...configDir ? [path24.join(configDir, "node_modules", "@opencode-ai", "plugin", "dist", "index.js")] : [],
     "@opencode-ai/plugin"
   ];
   const importModule = options.importModule ?? ((specifier) => import(specifier));
   for (const candidate of candidates) {
     try {
-      const specifier = path23.win32.isAbsolute(candidate) && !path23.isAbsolute(candidate) ? new URL(`file:///${candidate.replaceAll("\\", "/")}`).href : path23.isAbsolute(candidate) ? pathToFileURL2(candidate).href : candidate;
+      const specifier = path24.win32.isAbsolute(candidate) && !path24.isAbsolute(candidate) ? new URL(`file:///${candidate.replaceAll("\\", "/")}`).href : path24.isAbsolute(candidate) ? pathToFileURL2(candidate).href : candidate;
       const module = await importModule(specifier);
       if (typeof module.tool === "function" && module.tool.schema) {
         const factory = { tool: module.tool, schema: module.tool.schema };
@@ -23806,8 +25130,10 @@ async function CursorPlugin(input2) {
   const cacheDir = opencodeGlobalCacheDir();
   const apiBaseURL = cursorApiBaseURL();
   const classicTools = await loadClassicTools();
-  setPlanExecutionKickoff(async ({ sessionID, planPath }) => {
-    await input2.client.session.promptAsync({
+  const sessionClient = input2.client?.session;
+  const promptAsync = sessionClient?.promptAsync;
+  setPlanExecutionKickoff(typeof promptAsync === "function" ? async ({ sessionID, planPath }) => {
+    await promptAsync.call(sessionClient, {
       path: { id: sessionID },
       body: {
         agent: "build",
@@ -23818,7 +25144,7 @@ async function CursorPlugin(input2) {
         }]
       }
     });
-  });
+  } : void 0);
   let sessionAccessToken;
   async function persistAuth(body) {
     await input2.client.auth.set({
@@ -23935,6 +25261,12 @@ async function CursorPlugin(input2) {
           sessionActivity.recordActivity(event.properties.part.sessionID);
           break;
       }
+      await dispatchHostEventBridge({
+        event,
+        client: input2.client,
+        directory: input2.directory,
+        serverUrl: input2.serverUrl
+      });
     },
     async "tool.execute.before"(hookInput, output) {
       if (hookInput.tool !== "bash")
@@ -24094,6 +25426,7 @@ var init_plugin = __esm({
     init_web_search_tool();
     init_image_save_tool();
     init_plan_execution_kickoff();
+    init_host_event_bridge();
     MODULE_URL = new URL("./index.js", import.meta.url).href;
   }
 });
@@ -24120,7 +25453,7 @@ var init_dist2 = __esm({
 // worker.mjs
 import crypto3 from "node:crypto";
 import fs8 from "node:fs";
-import path24 from "node:path";
+import path25 from "node:path";
 import process2 from "node:process";
 var PROTOCOL_VERSION = 1;
 var MAX_FRAME_BYTES = 40 * 1024 * 1024;
@@ -24151,7 +25484,7 @@ var transportModules = null;
 var writeChain = Promise.resolve();
 function requiredPath(value, name14) {
   if (!value) throw providerError(`${name14} is not configured`, "CURSOR_CONFIGURATION_ERROR");
-  return path24.resolve(value);
+  return path25.resolve(value);
 }
 function providerError(message, code, options = {}) {
   const error = new Error(message);
@@ -24264,10 +25597,10 @@ function readCredentials() {
   return value;
 }
 function atomicPrivateJson(file, value) {
-  const directory = path24.dirname(file);
+  const directory = path25.dirname(file);
   fs8.mkdirSync(directory, { recursive: true, mode: 448 });
   if (process2.platform !== "win32") fs8.chmodSync(directory, 448);
-  const temporary = path24.join(directory, `.${path24.basename(file)}.${process2.pid}.${crypto3.randomUUID()}`);
+  const temporary = path25.join(directory, `.${path25.basename(file)}.${process2.pid}.${crypto3.randomUUID()}`);
   try {
     fs8.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}
 `, {
@@ -24653,7 +25986,7 @@ async function runChat(id, params, signal) {
     name: "hermes-cursor",
     accessToken: token,
     apiBaseURL: API_BASE3,
-    cacheDir: path24.join(
+    cacheDir: path25.join(
       requiredPath(STATE_DIR, "state directory"),
       accessTokenCache?.accountKey || accountKeyForToken(token, readCredentials().refreshToken)
     ),
